@@ -640,16 +640,32 @@ def fetch_sam_gov() -> list[Opportunity]:
     d30     = (today - timedelta(days=30)).strftime("%m/%d/%Y")
     d90     = (today - timedelta(days=90)).strftime("%m/%d/%Y")
 
-    # Pass 1: broad ptype sweeps — 4 calls, last 30 days
-    for ptype, lbl in [("r","RFI"), ("p","Presol"), ("k","Synopsis"), ("s","Special")]:
+    # Pass 1: ptype sweeps — ALL active opportunity types, last 30 days
+    # r=Sources Sought, p=Presolicitation, k=Combined Synopsis,
+    # s=Special Notice, o=Solicitation, i=Intent to Bundle
+    for ptype, lbl in [
+        ("r", "Sources Sought"),
+        ("p", "Presolicitation"),
+        ("k", "Combined Synopsis"),
+        ("s", "Special Notice"),
+        ("o", "Solicitation"),
+        ("i", "Intent to Bundle"),
+    ]:
         if not _sam_search({"ptype": ptype, "postedFrom": d30, "postedTo": to_date},
                            lbl, seen_ids, results):
             break
 
-    # Pass 2: targeted title searches — 8 calls, last 90 days
-    for term in ["data analytics", "investigative platform", "community supervision",
-                 "IT modernization", "artificial intelligence", "digital evidence",
-                 "records management", "federated search"]:
+    # Pass 2: targeted title searches — 90-day window catches older active opps
+    # and opps that might have fallen outside the 100-result cap in Pass 1
+    for term in [
+        "data analytics",        "investigative platform",
+        "community supervision", "IT modernization",
+        "artificial intelligence","digital evidence",
+        "records management",    "federated search",
+        "data integration",      "law enforcement analytics",
+        "public safety platform","entity resolution",
+        "crime analytics",       "offender management",
+    ]:
         if not _sam_search({"title": term, "postedFrom": d90, "postedTo": to_date},
                            f"title={term}", seen_ids, results):
             break
