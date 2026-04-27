@@ -2166,16 +2166,38 @@ def fetch_federal_funding() -> list[dict]:
     ]
 
     # Terms that indicate a grant is NOT relevant (physical goods, victim services)
+    # Grants that go to agencies/programs that would NOT buy Peregrine
     GRANT_EXCLUSIONS = [
+        # Physical goods
         "body armor", "equipment purchase", "vehicle", "construction",
+        "food", "clothing", "medical supply", "personal protective",
+        # Treatment / social services — not LE technology buyers
+        "treatment court", "drug court", "mental health court",
+        "substance abuse treatment", "addiction treatment",
+        "behavioral health", "mental health services",
         "victim services", "victim compensation", "victim assistance",
-        "mental health services", "substance abuse", "housing",
-        "food", "clothing", "child abuse", "domestic violence shelter",
-        "training only", "scholarship", "fellowship", "research only",
-        "medical", "healthcare", "dental", "hospital",
+        "domestic violence shelter", "sexual assault",
+        "child abuse", "elder abuse",
+        "housing assistance", "homeless", "shelter",
+        "nutrition", "food bank", "food assistance",
+        # Research / academic — not operational agencies
+        "research grant", "research only", "academic research",
+        "scholarship", "fellowship", "dissertation",
+        "university research", "college grant",
+        # Infrastructure / environment
         "road", "bridge", "transit", "transportation infrastructure",
         "wildfire", "flood", "hurricane", "disaster relief",
         "agricultural", "environmental", "conservation",
+        "water quality", "air quality",
+        # Medical / health (non-law enforcement)
+        "healthcare", "dental", "hospital", "clinic",
+        "public health", "epidemiology", "disease",
+        # Specific non-Peregrine program types
+        "midnight basketball", "after school", "youth mentoring",
+        "community garden", "arts program",
+        "legal aid", "public defender",
+        "immigration legal", "citizenship",
+        "literacy", "workforce development", "job training",
     ]
 
     all_terms = TECH_GRANT_TERMS + CUSTOMER_GRANT_TERMS
@@ -2212,14 +2234,27 @@ def fetch_federal_funding() -> list[dict]:
                 if any(excl in combined for excl in GRANT_EXCLUSIONS):
                     continue
 
-                # Must have at least one tech/data/platform signal
+                # Must have at least one genuine tech/data/platform signal
+                # "grant" and "funding" alone are NOT sufficient — too broad
                 tech_signals = [
-                    "technology", "software", "data", "platform", "system",
-                    "analytics", "information", "digital", "intelligence",
-                    "database", "records", "surveillance", "monitoring",
-                    "grant", "funding", "jag", "byrne", "cops",
+                    "technology", "software", "data analytics", "data platform",
+                    "information system", "digital", "analytics platform",
+                    "intelligence platform", "records management", "database",
+                    "surveillance", "monitoring system", "it system",
+                    "information technology", "data-driven", "predictive",
+                    "smart policing", "crime analytics", "law enforcement technology",
+                    "public safety technology",
                 ]
-                if not any(sig in combined for sig in tech_signals):
+                # Also allow specific Peregrine-relevant program names even without tech keyword
+                program_signals = [
+                    "byrne jag", "edward byrne", "justice assistance",
+                    "cops office", "community oriented policing",
+                    "second chance act", "justice reinvestment",
+                    "violence reduction", "community violence intervention",
+                    "smart policing", "nibin", "crime gun",
+                    "data-driven policing", "evidence-based policing",
+                ]
+                if not any(sig in combined for sig in tech_signals) and                    not any(prog in combined for prog in program_signals):
                     continue
 
                 open_date  = opp.get("openDate", "") or ""
