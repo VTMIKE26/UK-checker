@@ -1378,7 +1378,8 @@ def build_news_section(news_items: list) -> str:
 def build_html_email(opps: list[Opportunity], run_date: str,
                      source_counts: dict, news_items: list = None,
                      competitor_items: list = None, growth_items: list = None,
-                     funding_items: list = None) -> str:
+                     funding_items: list = None,
+                     budget_news: list = None) -> str:
     # Exclude events from solicitation tiers so stats bar reflects actual RFI/RFP counts
     # Separate solicitations from award intel — awards are intel only, not active opps
     non_events = [o for o in opps if o.source not in ("Events Intelligence", "USASpending.gov")]
@@ -1484,6 +1485,7 @@ def build_html_email(opps: list[Opportunity], run_date: str,
   {build_award_intel_section(usa_intel[:5])}
   {build_competitor_section(competitor_items or [], growth_items=growth_items or [])}
   {build_funding_section(funding_items or [])}
+  {build_budget_news_section(budget_news or [])}
   {build_news_section(news_items or [])}
   {build_section("🎤 Events & Conferences to Attend", sorted(events, key=lambda x: x.score, reverse=True))}
 
@@ -2008,6 +2010,94 @@ def fetch_competitor_intel() -> list[dict]:
     return deduped[:25]
 
 
+def fetch_agency_budget_news() -> list[dict]:
+    """
+    Surface recent budget/appropriations news for DOJ, DHS, and their
+    sub-agencies relevant to Peregrine's capability clusters.
+    Sources: Google News RSS + Federal Register budget notices.
+    This signals upcoming spending that could fund Peregrine deployments.
+    """
+    items    = []
+    seen     = set()
+    today    = datetime.utcnow()
+
+    # Google News RSS queries — one per agency/topic combination
+    BUDGET_QUERIES = [
+        # DOJ budget signals
+        ("DOJ Budget",          "Department+of+Justice+budget+technology+data+analytics"),
+        ("ATF Technology",      "ATF+Alcohol+Tobacco+Firearms+technology+data+platform"),
+        ("FBI Technology",      "FBI+technology+data+analytics+platform+modernization"),
+        ("BOP Technology",      "Bureau+of+Prisons+technology+corrections+data"),
+        ("OJP Funding",         "Office+of+Justice+Programs+grant+technology+law+enforcement"),
+        ("BJA Grant",           "Bureau+of+Justice+Assistance+grant+technology+data"),
+        ("COPS Technology",     "COPS+Office+grant+technology+policing+data+analytics"),
+        # DHS budget signals
+        ("DHS Budget",          "Department+of+Homeland+Security+budget+technology+IT"),
+        ("ICE Technology",      "ICE+immigration+enforcement+technology+data+platform"),
+        ("CISA Budget",         "CISA+cybersecurity+budget+technology+data+analytics"),
+        ("CBP Technology",      "CBP+border+protection+technology+data+platform+analytics"),
+        ("FEMA Technology",     "FEMA+emergency+management+technology+data+platform"),
+        # Program-specific funding news
+        ("Byrne JAG News",      "Byrne+JAG+grant+announcement+law+enforcement+technology"),
+        ("Violence Reduction",  "community+violence+intervention+grant+technology+data"),
+        ("Smart Policing",      "smart+policing+initiative+data+analytics+technology+grant"),
+        ("Second Chance",       "Second+Chance+Act+grant+technology+supervision+reentry"),
+        ("NIBIN Funding",       "NIBIN+crime+gun+intelligence+funding+ATF"),
+    ]
+
+    # Keywords that confirm relevance to Peregrine's capabilities
+    RELEVANCE_SIGNALS = [
+        "data", "analytics", "platform", "technology", "software",
+        "information", "digital", "modernization", "intelligence",
+        "system", "grant", "budget", "funding", "appropriation",
+        "award", "contract", "million", "billion",
+    ]
+
+    for label, query in BUDGET_QUERIES:
+        url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
+        try:
+            resp = requests.get(url, headers={
+                "User-Agent": "Mozilla/5.0 (compatible; PeregrineScanner/2.0)",
+                "Accept":     "application/rss+xml, application/xml, text/xml",
+            }, timeout=15)
+            if resp.status_code != 200:
+                continue
+            root = ET.fromstring(resp.content)
+            count = 0
+            for item in root.findall(".//item"):
+                if count >= 2:  # max 2 per query
+                    break
+                title_el = item.find("title")
+                link_el  = item.find("link")
+                desc_el  = item.find("description")
+                date_el  = item.find("pubDate")
+                ititle = (title_el.text or "").strip() if title_el is not None else ""
+                idesc  = unescape(re.sub(r"<[^>]+>","", (desc_el.text or ""))).strip() if desc_el is not None else ""
+                iurl   = (link_el.text or "").strip() if link_el is not None else ""
+                idate  = (date_el.text or "").strip() if date_el is not None else ""
+                if not ititle or ititle in seen:
+                    continue
+                combined = f"{ititle} {idesc}".lower()
+                if not any(sig in combined for sig in RELEVANCE_SIGNALS):
+                    continue
+                seen.add(ititle)
+                items.append({
+                    "label":   label,
+                    "title":   ititle,
+                    "summary": idesc[:280],
+                    "url":     clean_url(iurl, ""),
+                    "date":    idate[:16] if idate else "",
+                    "source":  "Google News",
+                })
+                count += 1
+            time.sleep(0.2)
+        except Exception as e:
+            print(f"[BudgetNews] {label}: {e}")
+
+    print(f"[Agency Budget News] {len(items)} signals found")
+    return items[:20]
+
+
 def fetch_federal_funding() -> list[dict]:
     """
     Federal grants relevant to Peregrine in two ways:
@@ -2040,16 +2130,39 @@ def fetch_federal_funding() -> list[dict]:
         "gunshot detection",            "crime gun intelligence",
     ]
 
-    # Group 2: Customer budget signals — grants to agencies who buy Peregrine
+    # Group 2: Customer budget signals — grants creating budget at Peregrine customer agencies
+    # These represent money flowing INTO agencies that buy platforms like Peregrine.
+    # Each term is mapped to a specific Peregrine use case in the Why It Fits logic.
     CUSTOMER_GRANT_TERMS = [
+        # BJA / Byrne JAG — most flexible LE grant, frequently used for data/analytics tech
         "byrne jag",                    "edward byrne",
-        "cops office",                  "cops hiring",
-        "second chance act",            "reentry grant",
-        "violence reduction",           "community violence intervention",
-        "gun violence reduction",       "recidivism reduction",
-        "justice reinvestment",         "smart policing",
-        "evidence-based policing",      "data-driven policing",
-        "bjag",                         "justice assistance grant",
+        "justice assistance grant",     "bjag",
+        # COPS Office — funds technology, data systems, analytics for community policing
+        "cops office technology",       "cops hiring program",
+        "community oriented policing",
+        # Corrections & supervision technology budget
+        "second chance act",            "justice reinvestment initiative",
+        "recidivism reduction",         "reentry",
+        "pretrial supervision",         "community supervision grant",
+        "corrections innovation",
+        # Violence reduction — agencies use for NIBIN, gunshot detection, crime analytics
+        "community violence intervention",
+        "gun violence reduction",       "violent crime reduction",
+        "antiviolence technology",      "crime prevention technology",
+        # Smart / data-driven policing — directly funds analytics platforms
+        "smart policing initiative",    "evidence-based policing",
+        "data-driven policing",         "predictive policing grant",
+        "crime data analytics grant",
+        # DOJ-specific programs that fund Peregrine customer agencies
+        "comprehensive opioid stimulant",
+        "national public safety partnership",
+        "dna backlog reduction",        "nibin funding",
+        "law enforcement information sharing",
+        # DHS programs funding state/local LE
+        "homeland security grant program",
+        "state homeland security program",
+        "urban area security initiative",
+        "law enforcement terrorism prevention",
     ]
 
     # Terms that indicate a grant is NOT relevant (physical goods, victim services)
@@ -2218,7 +2331,12 @@ def fetch_federal_funding() -> list[dict]:
 
 
 def _grant_why_it_fits(item: dict) -> list:
-    """Generate Why It Fits reasons for a grant, parallel to opportunity scoring."""
+    """
+    Generate Why It Fits reasoning for a grant.
+    Maps grant type/content to specific Peregrine capabilities and customer use cases.
+    Surfaces: which capability cluster is funded, which customer type gets the money,
+    and specifically how Peregrine addresses that need.
+    """
     title  = (item.get("title","") or "").lower()
     summ   = (item.get("summary","") or "").lower()
     rele   = (item.get("relevance","") or "").lower()
@@ -2226,51 +2344,140 @@ def _grant_why_it_fits(item: dict) -> list:
     text   = f" {title} {summ} {rele} "
     reasons = []
 
+    # ── Grant category ────────────────────────────────────────────────────────
     if "direct tech" in rtype:
-        reasons.append(("🎯","Direct Technology Grant","Funding for software/data platform procurement"))
-    elif "customer budget" in rtype or "budget signal" in rtype:
-        reasons.append(("💰","Customer Budget Signal","Funding flowing to agencies that buy Peregrine"))
+        reasons.append(("🎯","Direct Technology Grant",
+            "Agency procuring a software/data platform — Peregrine can respond directly"))
+    else:
+        reasons.append(("💰","Customer Budget Signal",
+            "Federal money flowing to agencies that deploy platforms like Peregrine"))
 
-    cluster_checks = [
-        (("data integrat","data analytics","data platform","information sharing","data management"),
-         "⬡","Data Integration & Unification"),
-        (("investigative","crime analytics","crime analysis","intelligence platform","link analysis"),
-         "◎","Investigative & Operational Analytics"),
-        (("federated search","enterprise search","cross-system"),
-         "⊕","Federated & Enterprise Search"),
-        (("entity resolution","record dedup","identity resolution"),
-         "◈","Entity Resolution & Record Intelligence"),
-        (("fedramp","cjis","govcloud","zero trust"),
-         "⬢","Secure Government SaaS"),
-        (("records management","fusion center","crime gun","law enforcement platform","public safety platform"),
-         "⬟","Public Safety & Law Enforcement"),
-        (("community supervision","probation","parole","offender management","reentry","recidivism","second chance","corrections"),
-         "⬡","Corrections & Community Supervision"),
-        (("it modernization","platform modernization","legacy","digital transformation","technology upgrade"),
-         "◇","Platform Modernization & Replacement"),
-        (("artificial intelligence","machine learning","predictive","ai platform","data-driven"),
-         "✦","AI & Machine Learning"),
+    # ── Capability cluster matches — what Peregrine capability does this fund? ─
+    # Each check includes a description of HOW Peregrine addresses that need
+    cap_checks = [
+        (
+            ("data integration","data analytics","information sharing","data management",
+             "data platform","data-driven","crime data","criminal justice data"),
+            "⬡","Data Integration & Unification",
+            "Peregrine unifies data from RMS, CAD, jail, court, and federal systems into one platform"
+        ),
+        (
+            ("investigative","crime analytics","crime analysis","intelligence",
+             "link analysis","pattern","crime mapping","crime gun","nibin","gunshot"),
+            "◎","Investigative & Operational Analytics",
+            "Peregrine surfaces patterns, links, and actionable intelligence across agency data"
+        ),
+        (
+            ("records management","rms","case management","incident report"),
+            "⬟","Records Management Integration",
+            "Peregrine integrates with and enhances existing RMS/CAD investments"
+        ),
+        (
+            ("community supervision","probation","parole","reentry","recidivism",
+             "offender","second chance","pretrial","supervision officer","justice reinvestment"),
+            "⬡","Corrections & Community Supervision",
+            "Peregrine is deployed at CSOSA and corrections agencies for offender data analytics"
+        ),
+        (
+            ("smart policing","evidence-based","data-driven","predictive policing",
+             "strategic policing","hotspot","crime reduction strategy"),
+            "📊","Data-Driven Policing",
+            "Peregrine's analytics platform directly enables evidence-based and predictive policing"
+        ),
+        (
+            ("violence reduction","gun violence","antiviolence","community violence",
+             "violent crime","nibin","ballistic"),
+            "🎯","Violence Reduction Technology",
+            "Peregrine integrates NIBIN, gunshot detection, and ballistic intelligence for gun crime investigations"
+        ),
+        (
+            ("technology","software","platform","system","digital","modernization",
+             "upgrade","information technology","it modernization"),
+            "◇","Platform Modernization",
+            "Peregrine replaces legacy systems and consolidates fragmented data environments"
+        ),
+        (
+            ("artificial intelligence","machine learning","predictive","ai","analytics platform"),
+            "✦","AI & Machine Learning",
+            "Peregrine applies AI/ML to investigative data for smarter, faster decision-making"
+        ),
+        (
+            ("fedramp","cjis","cloud","secure","govcloud","zero trust"),
+            "⬢","Secure Government SaaS",
+            "Peregrine is FedRAMP High authorized and CJIS-compliant — ready for any LE agency"
+        ),
     ]
-    for terms, icon, cname in cluster_checks:
+    for terms, icon, cname, peregrine_fit in cap_checks:
         matched = next((t for t in terms if t in text), None)
         if matched:
-            reasons.append((icon, cname, f"matched '{matched}'"))
+            reasons.append((icon, cname, peregrine_fit))
 
+    # ── Customer type + specific Peregrine application ─────────────────────────
     customer_checks = [
-        (("police","law enforcement","sheriff"), "🚔","Law Enforcement Agency Grant","Direct LE agency funding — Peregrine's primary buyer"),
-        (("corrections","bureau of prisons","jail"), "🏛","Corrections Agency Grant","Corrections agency funding"),
-        (("probation","parole","supervision","csosa"), "⚖️","Community Supervision Grant","Supervision agencies — CSOSA is an active Peregrine customer"),
-        (("byrne","bja","bjag","edward byrne","justice assistance"), "💵","Byrne JAG Funding","Flexible LE grant agencies use for technology"),
-        (("cops office","cops grant","community oriented policing"), "👮","COPS Office Grant","COPS grants frequently fund data and technology"),
-        (("gun violence","gunshot","crime gun","nibin","violence reduction"), "🎯","Violence Reduction Funding","Gun violence grants fund NIBIN/analytics platforms"),
-        (("smart policing","evidence-based","data-driven","predictive policing"), "📊","Data-Driven Policing Grant","Explicitly funds analytics and data-driven approaches"),
-        (("second chance","reentry","recidivism","justice reinvestment"), "🔄","Reentry / Justice Reform Grant","Funds supervision tech, reentry platforms, offender data"),
+        (
+            ("police department","law enforcement agency","sheriff","local police",
+             "municipal police","state police","patrol"),
+            "🚔","Local/State Law Enforcement",
+            "Peregrine deployed at LAPD, Albuquerque PD, Kansas City PD, Fairfax County PD — proven at scale"
+        ),
+        (
+            ("corrections","bureau of prisons","jail","detention","incarcerat"),
+            "🏛","Corrections Agencies",
+            "Peregrine integrates corrections data for cross-agency investigations and supervision analytics"
+        ),
+        (
+            ("probation","parole","community supervision","csosa","court services","pretrial"),
+            "⚖️","Supervision Agencies",
+            "Peregrine is live at CSOSA — unified supervision data, officer dashboards, offender analytics"
+        ),
+        (
+            ("fusion center","information sharing","multi-agency","interstate","regional"),
+            "🔗","Fusion Centers & Multi-Agency",
+            "Peregrine's federated search and entity resolution power multi-agency intelligence sharing"
+        ),
+        (
+            ("byrne","bja","bjag","edward byrne","justice assistance"),
+            "💵","Byrne JAG",
+            "Byrne JAG is the most flexible LE grant — agencies routinely use it to purchase analytics platforms"
+        ),
+        (
+            ("cops office","cops hiring","community oriented policing"),
+            "👮","COPS Office",
+            "COPS grants fund technology that supports community policing — data analytics and crime mapping qualify"
+        ),
+        (
+            ("homeland security grant","shsp","uasi","letpp"),
+            "🛡️","DHS Homeland Security Grants",
+            "SHSP/UASI funds flow to state and local LE for technology — Peregrine's FedRAMP compliance makes it eligible"
+        ),
+        (
+            ("second chance","reentry","recidivism","justice reinvestment"),
+            "🔄","Reentry & Justice Reform",
+            "Second Chance Act / JRI grants fund supervision technology, case management, and offender data systems"
+        ),
+        (
+            ("gun violence","antiviolence","community violence","nibin","gunshot detection"),
+            "🎯","Gun Violence Reduction Programs",
+            "CVI/NIBIN grants fund the exact crime gun intelligence capabilities Peregrine provides to ATF and local LE"
+        ),
+        (
+            ("atf","alcohol tobacco firearms","bureau of alcohol"),
+            "🔫","ATF Programs",
+            "Peregrine's CGIC deployment at ATF — direct relationship and proven crime gun intelligence capabilities"
+        ),
     ]
     for triggers, icon, label, desc in customer_checks:
         if any(t in text for t in triggers):
             reasons.append((icon, label, desc))
 
-    return reasons
+    # Deduplicate and cap at 4 most specific
+    seen = set()
+    deduped = []
+    for r in reasons:
+        if r[1] not in seen:
+            seen.add(r[1])
+            deduped.append(r)
+    return deduped[:4]
 
 
 def build_funding_section(funding_items: list) -> str:
@@ -2434,6 +2641,55 @@ def fetch_growth_news() -> list[dict]:
 
     print(f"[Growth News] {len(news_items)} market signal articles found")
     return news_items[:12]
+
+
+def build_budget_news_section(budget_news: list) -> str:
+    """Render agency budget news relevant to Peregrine's clusters."""
+    if not budget_news:
+        return ""
+
+    # Group by label
+    from collections import defaultdict
+    grouped = defaultdict(list)
+    for item in budget_news:
+        grouped[item["label"]].append(item)
+
+    rows = ""
+    for label in sorted(grouped.keys()):
+        stories = grouped[label][:2]
+        story_html = ""
+        for s in stories:
+            link = (f'<a href="{s["url"]}" style="color:#0057b8;text-decoration:none;font-weight:600;">'
+                    f'{s["title"][:95]}</a>'
+                    if s.get("url")
+                    else f'<span style="font-weight:600;color:#333;">{s["title"][:95]}</span>')
+            story_html += (
+                '<div style="margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid #f0f0f0;">'
+                f'<div style="font-size:13px;">{link}</div>'
+                f'<div style="font-size:11px;color:#888;margin-top:2px;">'
+                f'{s["source"]} &middot; {s["date"][:10]}</div>'
+                + (f'<div style="font-size:12px;color:#555;margin-top:2px;">{s["summary"][:180]}</div>'
+                   if s.get("summary") else "")
+                + '</div>'
+            )
+        rows += (
+            '<div style="margin-bottom:14px;">'
+            f'<div style="font-weight:700;font-size:12px;color:#555;margin-bottom:6px;'
+            f'text-transform:uppercase;letter-spacing:0.5px;">📡 {label}</div>'
+            f'{story_html}'
+            '</div>'
+        )
+
+    return (
+        '<div style="margin:20px 0 6px">'
+        f'<h2 style="font-size:16px;color:#222;border-bottom:2px solid #eee;padding-bottom:5px;">'
+        f'&#x1F4E1; Agency Budget &amp; Spending Signals ({len(budget_news)})</h2>'
+        '<p style="font-size:12px;color:#888;margin:0 0 12px;">'
+        'Recent budget news, appropriations, and spending announcements at DOJ, DHS, '
+        'and key sub-agencies — signals for upcoming technology procurement.</p>'
+        f'{rows}'
+        '</div>'
+    )
 
 
 def build_award_intel_section(awards: list) -> str:
@@ -2730,8 +2986,17 @@ def main():
         funding_items = []
         source_counts["Federal Funding"] = 0
 
+    # Fetch agency budget & spending news
+    print("\n[Budget News] Fetching agency budget signals...")
+    try:
+        budget_news = fetch_agency_budget_news()
+        source_counts["Budget News"] = len(budget_news)
+    except Exception as e:
+        print(f"[Budget News] Error: {e}")
+        budget_news = []
+
     # Build and send
-    html = build_html_email(ranked, run_date, source_counts, news_items=news_items, competitor_items=competitor_items, growth_items=growth_items, funding_items=funding_items)
+    html = build_html_email(ranked, run_date, source_counts, news_items=news_items, competitor_items=competitor_items, growth_items=growth_items, funding_items=funding_items, budget_news=budget_news)
     send_email(html, subject)
 
     # Save local copy
