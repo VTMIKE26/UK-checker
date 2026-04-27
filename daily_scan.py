@@ -2217,39 +2217,134 @@ def fetch_federal_funding() -> list[dict]:
 
 
 
+def _grant_why_it_fits(item: dict) -> list:
+    """Generate Why It Fits reasons for a grant, parallel to opportunity scoring."""
+    title  = (item.get("title","") or "").lower()
+    summ   = (item.get("summary","") or "").lower()
+    rele   = (item.get("relevance","") or "").lower()
+    rtype  = (item.get("type","") or "").lower()
+    text   = f" {title} {summ} {rele} "
+    reasons = []
+
+    if "direct tech" in rtype:
+        reasons.append(("🎯","Direct Technology Grant","Funding for software/data platform procurement"))
+    elif "customer budget" in rtype or "budget signal" in rtype:
+        reasons.append(("💰","Customer Budget Signal","Funding flowing to agencies that buy Peregrine"))
+
+    cluster_checks = [
+        (("data integrat","data analytics","data platform","information sharing","data management"),
+         "⬡","Data Integration & Unification"),
+        (("investigative","crime analytics","crime analysis","intelligence platform","link analysis"),
+         "◎","Investigative & Operational Analytics"),
+        (("federated search","enterprise search","cross-system"),
+         "⊕","Federated & Enterprise Search"),
+        (("entity resolution","record dedup","identity resolution"),
+         "◈","Entity Resolution & Record Intelligence"),
+        (("fedramp","cjis","govcloud","zero trust"),
+         "⬢","Secure Government SaaS"),
+        (("records management","fusion center","crime gun","law enforcement platform","public safety platform"),
+         "⬟","Public Safety & Law Enforcement"),
+        (("community supervision","probation","parole","offender management","reentry","recidivism","second chance","corrections"),
+         "⬡","Corrections & Community Supervision"),
+        (("it modernization","platform modernization","legacy","digital transformation","technology upgrade"),
+         "◇","Platform Modernization & Replacement"),
+        (("artificial intelligence","machine learning","predictive","ai platform","data-driven"),
+         "✦","AI & Machine Learning"),
+    ]
+    for terms, icon, cname in cluster_checks:
+        matched = next((t for t in terms if t in text), None)
+        if matched:
+            reasons.append((icon, cname, f"matched '{matched}'"))
+
+    customer_checks = [
+        (("police","law enforcement","sheriff"), "🚔","Law Enforcement Agency Grant","Direct LE agency funding — Peregrine's primary buyer"),
+        (("corrections","bureau of prisons","jail"), "🏛","Corrections Agency Grant","Corrections agency funding"),
+        (("probation","parole","supervision","csosa"), "⚖️","Community Supervision Grant","Supervision agencies — CSOSA is an active Peregrine customer"),
+        (("byrne","bja","bjag","edward byrne","justice assistance"), "💵","Byrne JAG Funding","Flexible LE grant agencies use for technology"),
+        (("cops office","cops grant","community oriented policing"), "👮","COPS Office Grant","COPS grants frequently fund data and technology"),
+        (("gun violence","gunshot","crime gun","nibin","violence reduction"), "🎯","Violence Reduction Funding","Gun violence grants fund NIBIN/analytics platforms"),
+        (("smart policing","evidence-based","data-driven","predictive policing"), "📊","Data-Driven Policing Grant","Explicitly funds analytics and data-driven approaches"),
+        (("second chance","reentry","recidivism","justice reinvestment"), "🔄","Reentry / Justice Reform Grant","Funds supervision tech, reentry platforms, offender data"),
+    ]
+    for triggers, icon, label, desc in customer_checks:
+        if any(t in text for t in triggers):
+            reasons.append((icon, label, desc))
+
+    return reasons
+
+
 def build_funding_section(funding_items: list) -> str:
-    """Render federal funding opportunities as a clean section."""
+    """Render federal funding opportunities with Why It Fits reasoning."""
     if not funding_items:
         return """
         <div style="margin:20px 0 6px">
-          <h2 style="font-size:16px;color:#222;border-bottom:2px solid #eee;padding-bottom:5px;">💰 Federal Funding Opportunities</h2>
+          <h2 style="font-size:16px;color:#222;border-bottom:2px solid #eee;padding-bottom:5px;">&#x1F4B0; Federal Funding Opportunities</h2>
           <p style="color:#aaa;font-size:13px;font-style:italic">No new relevant funding opportunities in the last 10 days.</p>
         </div>"""
 
     rows = ""
     for item in funding_items[:15]:
-        badge_color = "#27ae60" if item["type"] == "Grant" else "#8b0000"
-        close_html = f' &nbsp;·&nbsp; <strong>Closes:</strong> {item["close_date"]}' if item.get("close_date") else ""
-        link = ('<a href="' + item["url"] + '" style="font-weight:700;font-size:14px;color:#0057b8;text-decoration:none;">' + item["title"][:100] + '</a>') if item.get("url") else ('<span style="font-weight:700;font-size:14px;color:#333;">' + item["title"][:100] + '</span>')
-        summary = item.get("summary", "")[:250]
+        if "Direct Tech" in item["type"]:
+            badge_color, badge_text = "#27ae60", "Direct Tech Grant"
+        else:
+            badge_color, badge_text = "#0057b8", "Customer Budget Signal"
 
-        rows += f"""
-        <div style="border:1px solid #e8e8e8;border-radius:6px;padding:12px;margin-bottom:10px;background:#fff;">
-          <div style="margin-bottom:6px;">
-            <span style="background:{badge_color};color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:10px;">{item["type"]}</span>
-            <span style="font-size:11px;color:#888;margin-left:8px;">{item["source"]} · {item.get("open_date","")[:10]}</span>
-          </div>
-          <div style="margin-bottom:4px;">{link}</div>
-          <div style="font-size:12px;color:#666;margin-bottom:4px;">🏛 {item["agency"][:80]}{close_html}</div>
-          {f'<div style="font-size:12px;color:#555;line-height:1.4;">{summary}</div>' if summary else ''}
-        </div>"""
+        close_html = (f' &nbsp;&middot;&nbsp; <strong>Closes:</strong> {item["close_date"]}'
+                      if item.get("close_date") else "")
+        if item.get("url"):
+            link = (f'<a href="{item["url"]}" style="font-weight:700;font-size:14px;'
+                    f'color:#0057b8;text-decoration:none;">{item["title"][:110]}</a>')
+        else:
+            link = f'<span style="font-weight:700;font-size:14px;color:#333;">{item["title"][:110]}</span>'
+        summary = item.get("summary","")[:280]
 
-    return f"""
-    <div style="margin:20px 0 6px">
-      <h2 style="font-size:16px;color:#222;border-bottom:2px solid #eee;padding-bottom:5px;">💰 Federal Funding Opportunities — Last 10 Days ({len(funding_items)})</h2>
-      <p style="font-size:12px;color:#888;margin:0 0 10px;">Grants and funding notices for law enforcement, public safety, and corrections agencies — Peregrine's buyer base.</p>
-      {rows}
-    </div>"""
+        reasons = _grant_why_it_fits(item)
+        if reasons:
+            bullets = "".join(
+                f'<li style="margin-bottom:2px;">'
+                f'<strong style="color:#555;">{ico} {lbl}:</strong> '
+                f'<span style="color:#666;">{dsc}</span></li>'
+                for ico, lbl, dsc in reasons[:4]
+            )
+            why_html = (
+                '<div style="margin-top:8px;padding:8px 10px;background:#f8fafe;'
+                'border-left:3px solid #0057b8;border-radius:0 4px 4px 0;">'
+                '<div style="font-size:11px;font-weight:700;color:#0057b8;margin-bottom:4px;'
+                'text-transform:uppercase;letter-spacing:0.5px;">Why It Fits</div>'
+                f'<ul style="margin:0;padding-left:16px;font-size:12px;line-height:1.6;">{bullets}</ul>'
+                '</div>'
+            )
+        else:
+            why_html = ""
+
+        rows += (
+            '<div style="border:1px solid #e8e8e8;border-radius:6px;padding:12px;'
+            'margin-bottom:10px;background:#fff;">'
+            '<div style="margin-bottom:6px;">'
+            f'<span style="background:{badge_color};color:#fff;font-size:10px;font-weight:700;'
+            f'padding:2px 7px;border-radius:10px;">{badge_text}</span>'
+            f'<span style="font-size:11px;color:#888;margin-left:8px;">'
+            f'{item["source"]} &middot; {item.get("open_date","")[:10]}</span>'
+            '</div>'
+            f'<div style="margin-bottom:4px;">{link}</div>'
+            f'<div style="font-size:12px;color:#666;margin-bottom:4px;">'
+            f'&#x1F3DB; {item["agency"][:90]}{close_html}</div>'
+            + (f'<div style="font-size:12px;color:#555;line-height:1.5;margin-top:4px;">{summary}</div>'
+               if summary else "")
+            + why_html
+            + '</div>'
+        )
+
+    return (
+        '<div style="margin:20px 0 6px">'
+        '<h2 style="font-size:16px;color:#222;border-bottom:2px solid #eee;padding-bottom:5px;">'
+        f'&#x1F4B0; Federal Funding Opportunities &mdash; Last 10 Days ({len(funding_items)})</h2>'
+        '<p style="font-size:12px;color:#888;margin:0 0 10px;">'
+        'Direct tech grants Peregrine can respond to &nbsp;&middot;&nbsp; '
+        'Customer budget signals that create buying capacity</p>'
+        f'{rows}'
+        '</div>'
+    )
 
 
 def fetch_growth_news() -> list[dict]:
