@@ -2010,31 +2010,64 @@ def fetch_competitor_intel() -> list[dict]:
 
 def fetch_federal_funding() -> list[dict]:
     """
-    Searches for federal funding opportunities relevant to Peregrine's customers
-    over the past 10 days. Sources:
-      - grants.gov SEARCH API (free, no key)
-      - Federal Register grant/funding notices
-    Looks for grants to law enforcement, public safety, corrections agencies
-    that signal budget available to buy technology like Peregrine.
+    Federal grants relevant to Peregrine in two ways:
+      1. DIRECT: grants to buy technology/software/platforms like Peregrine
+         (BJA, COPS, OJP grants for LE technology, data systems)
+      2. CUSTOMER GRANTS: funding flowing to LE agencies, corrections, courts
+         that creates budget to purchase Peregrine
+         (Byrne JAG, COPS hiring, Second Chance, VAWA, etc.)
+
+    Filters out grants for physical equipment, victim services, training,
+    construction, and anything unrelated to data/technology procurement.
     """
-    today = datetime.utcnow()
-    since_dt = today - timedelta(days=10)
+    today     = datetime.utcnow()
+    since_dt  = today - timedelta(days=10)
     since_str = since_dt.strftime("%Y-%m-%d")
     funding_items = []
-    seen_ids = set()
+    seen_ids  = set()
 
-    # ── grants.gov API ────────────────────────────────────────────────────────
-    # Free public API, no key required
-    # https://www.grants.gov/web/grants/s2s/applicant-web-services.html
-    grants_keywords = [
-        "law enforcement", "public safety", "police", "crime",
-        "criminal justice", "corrections", "community supervision",
-        "data analytics", "technology", "violence reduction",
-        "reentry", "recidivism", "gunshot", "gun violence",
-        "investigative", "surveillance", "intelligence",
+    # ── Keyword strategy ──────────────────────────────────────────────────────
+    # Group 1: Technology grants directly relevant to Peregrine capabilities
+    TECH_GRANT_TERMS = [
+        "law enforcement technology",   "public safety technology",
+        "criminal justice data",        "crime analytics",
+        "data integration law enforcement",
+        "records management grant",     "information sharing grant",
+        "community supervision technology",
+        "corrections technology",       "offender management system",
+        "predictive policing",          "intelligence platform grant",
+        "digital evidence",             "body camera data",
+        "gunshot detection",            "crime gun intelligence",
     ]
 
-    for kw in grants_keywords[:8]:  # limit API calls
+    # Group 2: Customer budget signals — grants to agencies who buy Peregrine
+    CUSTOMER_GRANT_TERMS = [
+        "byrne jag",                    "edward byrne",
+        "cops office",                  "cops hiring",
+        "second chance act",            "reentry grant",
+        "violence reduction",           "community violence intervention",
+        "gun violence reduction",       "recidivism reduction",
+        "justice reinvestment",         "smart policing",
+        "evidence-based policing",      "data-driven policing",
+        "bjag",                         "justice assistance grant",
+    ]
+
+    # Terms that indicate a grant is NOT relevant (physical goods, victim services)
+    GRANT_EXCLUSIONS = [
+        "body armor", "equipment purchase", "vehicle", "construction",
+        "victim services", "victim compensation", "victim assistance",
+        "mental health services", "substance abuse", "housing",
+        "food", "clothing", "child abuse", "domestic violence shelter",
+        "training only", "scholarship", "fellowship", "research only",
+        "medical", "healthcare", "dental", "hospital",
+        "road", "bridge", "transit", "transportation infrastructure",
+        "wildfire", "flood", "hurricane", "disaster relief",
+        "agricultural", "environmental", "conservation",
+    ]
+
+    all_terms = TECH_GRANT_TERMS + CUSTOMER_GRANT_TERMS
+
+    for kw in all_terms:
         try:
             payload = {
                 "keyword": kw,
@@ -2050,21 +2083,36 @@ def fetch_federal_funding() -> list[dict]:
                 timeout=20,
             )
             if resp.status_code != 200:
-                print(f"[Funding/grants.gov] HTTP {resp.status_code} for '{kw}'")
                 continue
 
-            data = resp.json()
-            opps = data.get("oppHits", [])
-
-            for opp in opps:
+            for opp in resp.json().get("oppHits", []):
                 opp_id = str(opp.get("id", ""))
                 if opp_id in seen_ids:
                     continue
 
-                open_date = opp.get("openDate", "") or ""
+                title    = (opp.get("title", "") or "").strip()
+                synopsis = (opp.get("synopsis", "") or "").strip()
+                agency   = (opp.get("agencyName", "") or "").strip()
+                combined = f"{title} {synopsis}".lower()
+
+                # Skip if exclusion terms in title/synopsis
+                if any(excl in combined for excl in GRANT_EXCLUSIONS):
+                    continue
+
+                # Must have at least one tech/data/platform signal
+                tech_signals = [
+                    "technology", "software", "data", "platform", "system",
+                    "analytics", "information", "digital", "intelligence",
+                    "database", "records", "surveillance", "monitoring",
+                    "grant", "funding", "jag", "byrne", "cops",
+                ]
+                if not any(sig in combined for sig in tech_signals):
+                    continue
+
+                open_date  = opp.get("openDate", "") or ""
                 close_date = opp.get("closeDate", "") or ""
 
-                # Only include if opened in last 10 days
+                # Only include recent grants
                 if open_date:
                     try:
                         od = datetime.strptime(open_date[:10], "%m/%d/%Y")
@@ -2073,42 +2121,42 @@ def fetch_federal_funding() -> list[dict]:
                     except Exception:
                         pass
 
-                title = opp.get("title", "") or ""
-                agency = opp.get("agencyName", "") or ""
-                synopsis = opp.get("synopsis", "") or ""
-                opp_number = opp.get("number", "") or ""
-                url = f"https://www.grants.gov/search-results-detail/{opp_id}" if opp_id else "https://www.grants.gov"
-
                 seen_ids.add(opp_id)
+
+                # Tag as direct or customer budget signal
+                is_tech = any(t in combined for t in [t.lower() for t in TECH_GRANT_TERMS])
+                tag = "🎯 Direct Tech Grant" if is_tech else "💰 Customer Budget Signal"
+
                 funding_items.append({
-                    "type": "Grant",
+                    "type": tag,
                     "title": title,
                     "agency": agency,
-                    "number": opp_number,
+                    "number": opp.get("number", "") or "",
                     "open_date": open_date,
                     "close_date": close_date,
-                    "summary": synopsis[:300] if synopsis else f"Federal grant opportunity: {title}",
-                    "url": clean_url(url, "https://www.grants.gov"),
+                    "summary": synopsis[:350] if synopsis else f"Federal grant: {title}",
+                    "url": clean_url(
+                        f"https://www.grants.gov/search-results-detail/{opp_id}",
+                        "https://www.grants.gov"
+                    ),
                     "source": "grants.gov",
                     "relevance": kw,
                 })
-
             time.sleep(0.2)
         except Exception as e:
             print(f"[Funding/grants.gov] Error for '{kw}': {e}")
 
-    # ── Federal Register — grant/funding notices ──────────────────────────────
-    fr_funding_terms = [
-        "solicitation law enforcement technology",
-        "notice of funding law enforcement",
-        "grant public safety technology",
-        "notice of funding corrections",
-        "bja funding opportunity",
-        "cops grant technology",
-        "ojp solicitation data",
+    # ── Federal Register — OJP/BJA/COPS funding notices ───────────────────────
+    fr_terms = [
+        "bja funding opportunity technology",
+        "cops office technology grant",
+        "ojp solicitation data analytics",
+        "notice of funding law enforcement technology",
+        "second chance act technology",
+        "justice reinvestment data",
+        "smart policing initiative",
     ]
-
-    for term in fr_funding_terms:
+    for term in fr_terms:
         try:
             url_params = (
                 f"conditions[term]={requests.utils.quote(term)}"
@@ -2120,46 +2168,32 @@ def fetch_federal_funding() -> list[dict]:
             )
             resp = requests.get(
                 f"https://www.federalregister.gov/api/v1/documents.json?{url_params}",
-                headers={"User-Agent": HEADERS["User-Agent"]},
-                timeout=20,
+                headers={"User-Agent": HEADERS["User-Agent"]}, timeout=20,
             )
             if resp.status_code != 200:
                 continue
-
-            docs = resp.json().get("results", [])
-            for doc in docs:
+            for doc in resp.json().get("results", []):
                 doc_id = doc.get("document_number", "")
                 if doc_id in seen_ids:
                     continue
-
-                title = doc.get("title", "") or ""
-                abstract = doc.get("abstract", "") or ""
+                title    = (doc.get("title", "") or "").strip()
+                abstract = (doc.get("abstract", "") or "").strip()
                 combined = f"{title} {abstract}".lower()
-
-                # Must signal actual funding
-                funding_signals = [
-                    "grant", "funding", "solicitation", "notice of funding",
-                    "cooperative agreement", "award", "appropriation",
-                ]
-                if not any(s in combined for s in funding_signals):
+                if not any(s in combined for s in ["grant", "funding", "solicitation", "cooperative agreement"]):
                     continue
-
+                if any(excl in combined for excl in GRANT_EXCLUSIONS):
+                    continue
                 seen_ids.add(doc_id)
-                agencies = ", ".join(
-                    a.get("name", "") for a in doc.get("agencies", []) if a.get("name")
-                )
-                pub_date = doc.get("publication_date", "")
-                url = doc.get("html_url", f"https://www.federalregister.gov/documents/{doc_id}")
-
+                agencies = ", ".join(a.get("name","") for a in doc.get("agencies",[]) if a.get("name"))
                 funding_items.append({
-                    "type": "Federal Register",
+                    "type": "💰 Customer Budget Signal",
                     "title": title,
                     "agency": agencies or "Federal Agency",
                     "number": doc_id,
-                    "open_date": pub_date,
+                    "open_date": doc.get("publication_date",""),
                     "close_date": "",
-                    "summary": abstract[:300],
-                    "url": clean_url(url, "https://www.federalregister.gov"),
+                    "summary": abstract[:350],
+                    "url": clean_url(doc.get("html_url",""), "https://www.federalregister.gov"),
                     "source": "Federal Register",
                     "relevance": term,
                 })
@@ -2167,7 +2201,7 @@ def fetch_federal_funding() -> list[dict]:
         except Exception as e:
             print(f"[Funding/FederalRegister] Error for '{term}': {e}")
 
-    # Deduplicate by title similarity and sort by open date descending
+    # Deduplicate and sort
     seen_titles = set()
     deduped = []
     for item in funding_items:
@@ -2176,8 +2210,11 @@ def fetch_federal_funding() -> list[dict]:
             seen_titles.add(key)
             deduped.append(item)
 
-    print(f"[Federal Funding] {len(deduped)} funding opportunities found (last 10 days)")
-    return sorted(deduped, key=lambda x: x.get("open_date", ""), reverse=True)[:20]
+    deduped.sort(key=lambda x: x.get("open_date",""), reverse=True)
+    print(f"[Federal Funding] {len(deduped)} relevant grants found")
+    return deduped[:20]
+
+
 
 
 def build_funding_section(funding_items: list) -> str:
