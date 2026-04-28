@@ -655,19 +655,31 @@ def fetch_sam_gov() -> list[Opportunity]:
                            lbl, seen_ids, results):
             break
 
-    # Pass 2: targeted title searches — 90-day window catches older active opps
-    # and opps that might have fallen outside the 100-result cap in Pass 1
-    for term in [
-        "data analytics",        "investigative platform",
-        "community supervision", "IT modernization",
-        "artificial intelligence","digital evidence",
-        "records management",    "federated search",
-        "data integration",      "law enforcement analytics",
-        "public safety platform","entity resolution",
-        "crime analytics",       "offender management",
-    ]:
+    # Pass 2: targeted title searches — 90-day window, paginated for high-volume terms
+    # Single-page terms (specific enough that <100 results expected)
+    SINGLE_PAGE_TERMS = [
+        "investigative platform",  "community supervision",
+        "digital evidence",        "federated search",
+        "law enforcement analytics","public safety platform",
+        "entity resolution",       "crime analytics",
+        "offender management",     "records management system",
+        "enterprise data",         "data environment",
+        "data fabric",             "data mesh",
+        "zero trust analytics",    "fedramp analytics",
+    ]
+    # Two-page terms (high volume — need pages 1+2 to avoid missing opps)
+    TWO_PAGE_TERMS = [
+        "data analytics",          "data integration",
+        "IT modernization",        "artificial intelligence",
+        "machine learning",        "platform modernization",
+    ]
+    for term in SINGLE_PAGE_TERMS:
         if not _sam_search({"title": term, "postedFrom": d90, "postedTo": to_date},
-                           f"title={term}", seen_ids, results):
+                           f"title={term}", seen_ids, results, pages=1):
+            break
+    for term in TWO_PAGE_TERMS:
+        if not _sam_search({"title": term, "postedFrom": d90, "postedTo": to_date},
+                           f"title={term}", seen_ids, results, pages=2):
             break
 
     # Cache results so DOJ/DHS can filter without extra API calls
@@ -679,6 +691,19 @@ def fetch_sam_gov() -> list[Opportunity]:
 
 
 # DOJ agency path fragments — match against fullParentPathName
+# DoD agencies with enterprise data / AI / analytics needs
+DOD_PATH_FRAGMENTS = [
+    "national guard", "national guard bureau", "ngb",
+    "defense information systems", "disa",
+    "defense intelligence agency", "dia",
+    "defense logistics agency", "dla",
+    "defense advanced research", "darpa",
+    "office of the secretary of defense", "osd",
+    "defense contract", "defense finance",
+    "army", "navy", "air force", "marine corps", "space force",
+    "joint chiefs", "combatant command",
+]
+
 DOJ_PATH_FRAGMENTS = [
     "department of justice", "dept of justice",
     "alcohol, tobacco", "atf",
@@ -747,6 +772,11 @@ AGENCY_SEARCH_TERMS = [
     "predictive analytics",      "computer vision",
     "AI platform",
 ]
+
+def _is_dod(path: str) -> bool:
+    p = path.lower()
+    return any(f in p for f in DOD_PATH_FRAGMENTS)
+
 
 def _is_doj(path: str) -> bool:
     p = path.lower()
@@ -876,6 +906,18 @@ def fetch_dhs_opportunities() -> list[Opportunity]:
 
     print(f"[DHS] {len(results)} opportunities (fallback API calls)")
     return results
+
+def fetch_dod_opportunities() -> list[Opportunity]:
+    """
+    Filter SAM cache for DoD agency opportunities with enterprise data/AI needs.
+    NGB, DISA, DIA, DLA, and other DoD analytics/modernization programs.
+    Zero additional API calls — filters the existing SAM cache.
+    """
+    from_cache = [o for o in _SAM_RESULTS_CACHE if _is_dod(o.agency)]
+    if from_cache:
+        print(f"[DoD] {len(from_cache)} opportunities (from SAM cache)")
+    return from_cache
+
 
 def fetch_federal_register() -> list[Opportunity]:
     """Search Federal Register for RFI/Sources Sought notices (10-day window)."""
@@ -2133,17 +2175,17 @@ def fetch_federal_funding() -> list[dict]:
     seen_ids  = set()
 
     # ── Keyword strategy ──────────────────────────────────────────────────────
-    # Group 1: Technology grants directly relevant to Peregrine capabilities
+    # Group 1: Direct technology grants — specific enough to return relevant results only
     TECH_GRANT_TERMS = [
-        "law enforcement technology",   "public safety technology",
-        "criminal justice data",        "crime analytics",
-        "data integration law enforcement",
-        "records management grant",     "information sharing grant",
-        "community supervision technology",
-        "corrections technology",       "offender management system",
-        "predictive policing",          "intelligence platform grant",
-        "digital evidence",             "body camera data",
-        "gunshot detection",            "crime gun intelligence",
+        "law enforcement technology grant",  "public safety technology grant",
+        "criminal justice data analytics",   "crime analytics platform",
+        "records management system grant",   "information sharing technology",
+        "community supervision technology",  "corrections data platform",
+        "offender management system",        "predictive analytics policing",
+        "intelligence platform grant",       "digital evidence management",
+        "crime gun intelligence center",     "gunshot detection technology",
+        "law enforcement data platform",     "investigative analytics grant",
+        "body camera data analytics",        "fusion center technology",
     ]
 
     # Group 2: Customer budget signals — grants creating budget at Peregrine customer agencies
@@ -2948,6 +2990,7 @@ def main():
         ("SAM.gov",           fetch_sam_gov),
         ("DOJ",               fetch_doj_opportunities),
         ("DHS",               fetch_dhs_opportunities),
+        ("DoD",               fetch_dod_opportunities),
         ("Federal Register",  fetch_federal_register),
         ("USASpending.gov",   fetch_usaspending_intel),
         ("Agency RSS",        fetch_agency_rss_feeds),
