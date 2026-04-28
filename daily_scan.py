@@ -720,3 +720,1195 @@ def fetch_sam_gov() -> list[Opportunity]:
     _SAM_RESULTS_CACHE.extend(results)
     print(f"[SAM.gov] {len(results)} total opportunities across all agencies")
     return results
+
+
+
+# ---------------------------------------------------------------------------
+# SAM RESULTS CACHE — populated by fetch_sam_gov, filtered by DOJ/DHS/DoD
+# ---------------------------------------------------------------------------
+_SAM_RESULTS_CACHE: list = []
+
+# DOD agency path fragments
+DOD_PATH_FRAGMENTS = [
+    "national guard", "national guard bureau", "ngb",
+    "defense information systems", "disa",
+    "defense intelligence agency", "dia",
+    "defense logistics agency", "dla",
+    "defense advanced research", "darpa",
+    "office of the secretary of defense", "osd",
+    "defense contract", "defense finance",
+    "army", "navy", "air force", "marine corps", "space force",
+    "joint chiefs", "combatant command",
+]
+DOJ_PATH_FRAGMENTS = [
+    "department of justice", "dept of justice",
+    "alcohol, tobacco", "atf",
+    "federal bureau of investigation", "fbi",
+    "drug enforcement administration", "dea",
+    "bureau of prisons", "bop",
+    "office of justice programs", "ojp",
+    "court services and offender", "csosa",
+    "community oriented policing", "cops office",
+    "u.s. marshals", "marshals service",
+    "executive office for united states attorneys",
+    "national security division",
+]
+DHS_PATH_FRAGMENTS = [
+    "homeland security", "dhs",
+    "customs and border protection", "cbp",
+    "immigration and customs enforcement", "ice",
+    "coast guard", "uscg",
+    "cybersecurity and infrastructure", "cisa",
+    "federal emergency management", "fema",
+    "transportation security administration", "tsa",
+    "secret service", "usss",
+    "citizenship and immigration services", "uscis",
+    "federal law enforcement training", "fletc",
+]
+AGENCY_SEARCH_TERMS = [
+    "data integration", "data analytics platform", "data management platform",
+    "enterprise data platform", "data unification", "information sharing platform",
+    "investigative analytics", "crime analytics", "law enforcement analytics",
+    "intelligence platform", "link analysis", "digital evidence",
+    "evidence management", "situational awareness", "operational intelligence",
+    "federated search", "enterprise search", "cross-system search",
+    "entity resolution", "record deduplication", "identity resolution",
+    "data deduplication", "fedramp", "cjis", "govcloud", "zero trust",
+    "law enforcement platform", "public safety platform",
+    "records management system", "fusion center", "crime gun intelligence",
+    "body camera analytics", "community supervision", "offender management",
+    "probation", "corrections platform", "court services",
+    "IT modernization", "platform modernization", "legacy modernization",
+    "platform replacement", "digital transformation",
+    "artificial intelligence", "machine learning", "predictive analytics",
+    "computer vision", "AI platform",
+]
+
+
+def _is_dod(path: str) -> bool:
+    p = path.lower()
+    return any(f in p for f in DOD_PATH_FRAGMENTS)
+
+
+def _is_doj(path: str) -> bool:
+    p = path.lower()
+    return any(f in p for f in DOJ_PATH_FRAGMENTS)
+
+
+def _is_dhs(path: str) -> bool:
+    p = path.lower()
+    return any(f in p for f in DHS_PATH_FRAGMENTS)
+
+
+def fetch_doj_opportunities() -> list:
+    from_cache = [o for o in _SAM_RESULTS_CACHE if _is_doj(o.agency)]
+    if from_cache:
+        print(f"[DOJ] {len(from_cache)} opportunities (from SAM cache)")
+        return from_cache
+    print("[DOJ] Cache empty — no fallback calls")
+    return []
+
+
+def fetch_dhs_opportunities() -> list:
+    from_cache = [o for o in _SAM_RESULTS_CACHE if _is_dhs(o.agency)]
+    if from_cache:
+        print(f"[DHS] {len(from_cache)} opportunities (from SAM cache)")
+        return from_cache
+    print("[DHS] Cache empty — no fallback calls")
+    return []
+
+
+def fetch_dod_opportunities() -> list:
+    from_cache = [o for o in _SAM_RESULTS_CACHE if _is_dod(o.agency)]
+    if from_cache:
+        print(f"[DoD] {len(from_cache)} opportunities (from SAM cache)")
+    return from_cache
+
+
+# ---------------------------------------------------------------------------
+# SOURCE 2: FEDERAL REGISTER
+# ---------------------------------------------------------------------------
+def fetch_federal_register() -> list:
+    results, seen_ids = [], set()
+    today  = datetime.utcnow()
+    since  = (today - timedelta(days=10)).strftime("%Y-%m-%d")
+    terms  = [
+        "data analytics", "law enforcement analytics",
+        "community supervision", "IT modernization",
+        "investigative platform", "artificial intelligence",
+        "digital evidence", "records management",
+    ]
+    for term in terms:
+        try:
+            params = (
+                f"conditions[term]={requests.utils.quote(term)}"
+                f"&conditions[publication_date][gte]={since}"
+                f"&conditions[type][]=NOTICE&per_page=10&order=newest"
+                f"&fields[]=document_number&fields[]=title&fields[]=abstract"
+                f"&fields[]=publication_date&fields[]=agencies&fields[]=html_url"
+            )
+            r = requests.get(
+                f"https://www.federalregister.gov/api/v1/documents.json?{params}",
+                headers={"User-Agent": HEADERS["User-Agent"]}, timeout=20,
+            )
+            if r.status_code != 200:
+                continue
+            for doc in r.json().get("results", []):
+                doc_id = doc.get("document_number", "")
+                if doc_id in seen_ids:
+                    continue
+                title = (doc.get("title", "") or "").strip()
+                abstract = (doc.get("abstract", "") or "").strip()
+                combined = f"{title} {abstract}".lower()
+                if not any(s in combined for s in ["request for information", "sources sought",
+                                                     "industry day", "market research", "rfi"]):
+                    continue
+                seen_ids.add(doc_id)
+                agencies = ", ".join(a.get("name", "") for a in doc.get("agencies", []) if a.get("name"))
+                opp = Opportunity(
+                    title=title, notice_id=f"FR-{doc_id}",
+                    agency=agencies or "Federal Agency",
+                    posted_date=doc.get("publication_date", ""),
+                    response_date="TBD",
+                    description=abstract[:2000],
+                    url=clean_url(doc.get("html_url", ""), "https://www.federalregister.gov"),
+                    opp_type="Federal Register RFI", source="Federal Register",
+                )
+                results.append(score_opportunity(opp))
+            time.sleep(0.2)
+        except Exception as e:
+            print(f"[FederalRegister] '{term}': {e}")
+    print(f"[Federal Register] {len(results)} notices")
+    return results
+
+
+# ---------------------------------------------------------------------------
+# SOURCE 3: USASPENDING — competitive intel
+# ---------------------------------------------------------------------------
+def fetch_usaspending_intel() -> list:
+    results, seen_ids = [], set()
+    today = datetime.utcnow()
+    start = (today - timedelta(days=180)).strftime("%Y-%m-%d")
+    end   = today.strftime("%Y-%m-%d")
+    batches = [
+        ["law enforcement software"], ["data analytics"],
+        ["community supervision"],    ["investigative platform"],
+        ["palantir"],                 ["corrections software"],
+    ]
+    for keywords in batches:
+        try:
+            payload = {
+                "subawards": False, "limit": 10, "page": 1,
+                "filters": {
+                    "keywords": keywords,
+                    "award_type_codes": ["A", "B", "C", "D"],
+                    "time_period": [{"start_date": start, "end_date": end}],
+                },
+                "fields": ["Award ID", "Recipient Name", "Start Date", "End Date",
+                           "Award Amount", "Awarding Agency", "Awarding Sub Agency",
+                           "Description"],
+                "sort": "Award Amount", "order": "desc",
+            }
+            r = requests.post(
+                "https://api.usaspending.gov/api/v2/search/spending_by_award/",
+                json=payload,
+                headers={**HEADERS, "Content-Type": "application/json"},
+                timeout=30,
+            )
+            r.raise_for_status()
+            for award in r.json().get("results", []):
+                aid = award.get("Award ID", "")
+                nid = f"USA-{aid}"
+                if nid in seen_ids:
+                    continue
+                seen_ids.add(nid)
+                amount    = award.get("Award Amount", 0) or 0
+                recipient = award.get("Recipient Name", "Unknown")
+                agency    = award.get("Awarding Agency", "")
+                sub       = award.get("Awarding Sub Agency", "")
+                desc      = (award.get("Description", "") or "")[:150]
+                start_dt  = award.get("Start Date", "")
+                end_dt    = award.get("End Date", "")
+                opp = Opportunity(
+                    title=f"[AWARD INTEL] {desc[:80] or 'Contract'} — {recipient}",
+                    notice_id=nid,
+                    agency=f"{agency} / {sub}",
+                    posted_date=start_dt or end,
+                    response_date="Watch for recompete",
+                    description=(f"Award to {recipient} by {agency}. "
+                                 f"Value: ${amount:,.0f}. Period: {start_dt} to {end_dt}. {desc}"),
+                    url=clean_url(f"https://www.usaspending.gov/award/{aid}/",
+                                  "https://www.usaspending.gov"),
+                    opp_type="Award Intel", source="USASpending.gov",
+                )
+                results.append(score_opportunity(opp))
+            time.sleep(0.5)
+        except Exception as e:
+            print(f"[USASpending] {keywords}: {e}")
+    print(f"[USASpending] {len(results)} award intel records")
+    return results
+
+
+# ---------------------------------------------------------------------------
+# SOURCE 4: AGENCY RSS FEEDS
+# ---------------------------------------------------------------------------
+def fetch_agency_rss_feeds() -> list:
+    return []  # RSS feeds captured in industry news; this source reserved
+
+
+# ---------------------------------------------------------------------------
+# SOURCE 5: EVENTS INTELLIGENCE
+# ---------------------------------------------------------------------------
+KNOWN_EVENTS = [
+    {"title": "IACP Annual Conference", "date": "2026-10-18", "location": "Boston, MA",
+     "url": "https://www.theiacp.org/events/iacp-annual-conference",
+     "tags": ["law enforcement", "public safety"]},
+    {"title": "Corrections Technology Summit", "date": "2026-07-15", "location": "Nashville, TN",
+     "url": "https://www.corrections.com", "tags": ["corrections", "supervision"]},
+    {"title": "GovSec Conference", "date": "2026-06-10", "location": "Washington, DC",
+     "url": "https://www.govsecinfo.com", "tags": ["government security", "law enforcement"]},
+    {"title": "SEARCH Symposium", "date": "2026-05-20", "location": "New Orleans, LA",
+     "url": "https://www.search.org", "tags": ["criminal justice", "technology"]},
+]
+
+
+def fetch_events_intelligence() -> list:
+    results = []
+    today   = datetime.utcnow()
+    cutoff  = today + timedelta(days=90)
+    for ev in KNOWN_EVENTS:
+        try:
+            ev_dt = datetime.strptime(ev["date"], "%Y-%m-%d")
+            if ev_dt < today or ev_dt > cutoff:
+                continue
+            opp = Opportunity(
+                title=ev["title"],
+                notice_id=f"EVT-{ev['date']}-{ev['title'][:20].replace(' ','')}",
+                agency="Industry Event",
+                posted_date=today.strftime("%Y-%m-%d"),
+                response_date=ev["date"],
+                description=f"Industry event. Location: {ev.get('location', 'TBD')}",
+                url=ev.get("url", ""),
+                opp_type="Industry Day",
+                source="Events Intelligence",
+            )
+            results.append(score_opportunity(opp))
+        except Exception:
+            pass
+    print(f"[Events] {len(results)} upcoming events (next 90 days)")
+    return results
+
+
+# ---------------------------------------------------------------------------
+# INDUSTRY NEWS
+# ---------------------------------------------------------------------------
+def fetch_industry_news() -> list[dict]:
+    news   = []
+    seen   = set()
+    feeds  = [
+        {"url": "https://fedscoop.com/feed/",                   "source": "FedScoop"},
+        {"url": "https://www.nextgov.com/rss/all/",             "source": "Nextgov"},
+        {"url": "https://gcn.com/rss-feeds/all.aspx",           "source": "GCN"},
+        {"url": "https://www.govtech.com/public-safety/rss.xml","source": "GovTech"},
+        {"url": "https://www.police1.com/rss/all/",             "source": "Police1"},
+        {"url": "https://www.corrections1.com/rss/all/",        "source": "Corrections1"},
+    ]
+    keywords = [
+        "law enforcement", "public safety", "data analytics", "artificial intelligence",
+        "machine learning", "criminal justice", "corrections", "fedramp", "cjis",
+        "records management", "predictive", "surveillance", "crime analytics",
+    ]
+    for feed in feeds:
+        try:
+            r = requests.get(feed["url"], headers={
+                "User-Agent": HEADERS["User-Agent"],
+                "Accept": "application/rss+xml, application/xml, text/xml",
+            }, timeout=15)
+            if r.status_code != 200:
+                continue
+            root = ET.fromstring(r.content)
+            for item in root.findall(".//item")[:15]:
+                t_el = item.find("title")
+                l_el = item.find("link")
+                d_el = item.find("description")
+                p_el = item.find("pubDate")
+                title = (t_el.text or "").strip() if t_el is not None else ""
+                desc  = unescape(re.sub(r"<[^>]+>", "", (d_el.text or ""))).strip() if d_el is not None else ""
+                url_  = (l_el.text or "").strip() if l_el is not None else ""
+                date_ = (p_el.text or "").strip() if p_el is not None else ""
+                if not title or title in seen:
+                    continue
+                combined = f"{title} {desc}".lower()
+                if not any(kw in combined for kw in keywords):
+                    continue
+                seen.add(title)
+                news.append({
+                    "title": title, "url": clean_url(url_, ""),
+                    "source": feed["source"], "date": date_[:16],
+                    "summary": desc[:250],
+                })
+            time.sleep(0.2)
+        except Exception as e:
+            print(f"[IndustryNews] {feed['source']}: {e}")
+    print(f"[Industry News] {len(news)} articles")
+    return news[:15]
+
+
+def fetch_growth_news() -> list[dict]:
+    return []  # Placeholder — industry news covers this
+
+
+# ---------------------------------------------------------------------------
+# COMPETITOR INTELLIGENCE
+# ---------------------------------------------------------------------------
+COMPETITORS = [
+    {"name": "Palantir",           "search": "Palantir law enforcement government",        "tags": ["palantir"]},
+    {"name": "Axon",               "search": "Axon public safety technology",               "tags": ["axon"]},
+    {"name": "ShotSpotter",        "search": "ShotSpotter gunshot detection",               "tags": ["shotspotter", "soundthinking"]},
+    {"name": "Mark43",             "search": "Mark43 records management police",            "tags": ["mark43"]},
+    {"name": "Tyler Technologies", "search": "Tyler Technologies criminal justice",         "tags": ["tyler technologies"]},
+    {"name": "Motorola Solutions", "search": "Motorola Solutions public safety",            "tags": ["motorola solutions"]},
+    {"name": "IBM i2",             "search": "IBM i2 law enforcement analytics",            "tags": ["ibm i2"]},
+    {"name": "Esri",               "search": "Esri law enforcement government GIS",         "tags": ["esri"]},
+    {"name": "Databricks",         "search": "Databricks government federal",               "tags": ["databricks"]},
+    {"name": "Appriss",            "search": "Appriss corrections supervision",             "tags": ["appriss"]},
+    {"name": "SuperCom",           "search": "SuperCom offender monitoring",                "tags": ["supercom"]},
+    {"name": "Flock Safety",       "search": "Flock Safety license plate law enforcement", "tags": ["flock safety", "flock camera"]},
+]
+
+COMPETITOR_NEWS_FEEDS = [
+    {"url": "https://fedscoop.com/feed/",                    "source": "FedScoop"},
+    {"url": "https://www.nextgov.com/rss/all/",              "source": "Nextgov"},
+    {"url": "https://gcn.com/rss-feeds/all.aspx",            "source": "GCN"},
+    {"url": "https://www.govtech.com/public-safety/rss.xml", "source": "GovTech"},
+    {"url": "https://www.police1.com/rss/all/",              "source": "Police1"},
+    {"url": "https://www.corrections1.com/rss/all/",         "source": "Corrections1"},
+    {"url": "https://defensescoop.com/feed/",                "source": "DefenseScoop"},
+    {"url": "https://statescoop.com/feed/",                  "source": "StateScoop"},
+]
+
+COMPETITOR_NEWS_QUERIES = [
+    ("Palantir",           "Palantir+federal+government+contract"),
+    ("Axon",               "Axon+Enterprise+law+enforcement+technology"),
+    ("ShotSpotter",        "ShotSpotter+OR+SoundThinking+police"),
+    ("Mark43",             "Mark43+records+management+police"),
+    ("Tyler Technologies", "Tyler+Technologies+public+safety+government"),
+    ("Motorola Solutions", "Motorola+Solutions+law+enforcement+data"),
+    ("IBM i2",             "IBM+i2+intelligence+analytics+government"),
+    ("Esri",               "Esri+law+enforcement+public+safety+GIS"),
+    ("Databricks",         "Databricks+government+law+enforcement+federal"),
+    ("Appriss",            "Appriss+criminal+justice+data"),
+    ("SuperCom",           "SuperCom+offender+monitoring+supervision"),
+    ("Flock Safety",       "Flock+Safety+license+plate+law+enforcement"),
+]
+
+
+def fetch_competitor_intel() -> list[dict]:
+    items_out  = []
+    seen_titles = set()
+
+    def _fetch_gnews(comp_name: str, query: str, max_items: int = 5):
+        url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
+        out = []
+        try:
+            r = requests.get(url, headers={
+                "User-Agent": "Mozilla/5.0 (compatible; PeregrineScanner/2.0)",
+                "Accept": "application/rss+xml, application/xml, text/xml",
+            }, timeout=15)
+            if r.status_code != 200:
+                return out
+            root = ET.fromstring(r.content)
+            for item in root.findall(".//item")[:max_items]:
+                t_el = item.find("title")
+                l_el = item.find("link")
+                d_el = item.find("description")
+                p_el = item.find("pubDate")
+                title = (t_el.text or "").strip() if t_el is not None else ""
+                desc  = unescape(re.sub(r"<[^>]+>", "", (d_el.text or ""))).strip() if d_el is not None else ""
+                url_  = (l_el.text or "").strip() if l_el is not None else ""
+                date_ = (p_el.text or "").strip() if p_el is not None else ""
+                if not title or title in seen_titles:
+                    continue
+                seen_titles.add(title)
+                out.append({
+                    "competitor": comp_name,
+                    "title": title,
+                    "url": clean_url(url_, ""),
+                    "source": "Google News",
+                    "date": date_[:16] if date_ else "",
+                    "summary": desc[:300],
+                })
+        except Exception as e:
+            print(f"[CompetitorIntel] Google News {comp_name}: {e}")
+        return out
+
+    for comp_name, query in COMPETITOR_NEWS_QUERIES:
+        items_out.extend(_fetch_gnews(comp_name, query, max_items=2))
+        time.sleep(0.2)
+
+    # USASpending recompetes
+    recompete_targets = [
+        ("Palantir",           ["palantir"]),
+        ("Axon",               ["axon enterprise", "axon public safety"]),
+        ("Tyler Technologies", ["tyler technologies"]),
+        ("Motorola Solutions", ["motorola solutions"]),
+        ("Mark43",             ["mark43"]),
+        ("IBM i2",             ["ibm i2", "i2 analyst"]),
+        ("ShotSpotter",        ["shotspotter", "soundthinking"]),
+        ("Flock Safety",       ["flock safety"]),
+    ]
+    today    = datetime.utcnow()
+    end_soon = (today + timedelta(days=365)).strftime("%Y-%m-%d")
+    for comp_name, keywords in recompete_targets:
+        try:
+            payload = {
+                "subawards": False, "limit": 5, "page": 1,
+                "filters": {
+                    "keywords": keywords,
+                    "award_type_codes": ["A", "B", "C", "D"],
+                    "time_period": [{"start_date": "2020-01-01", "end_date": end_soon}],
+                },
+                "fields": ["Award ID", "Recipient Name", "Start Date", "End Date",
+                           "Award Amount", "Awarding Agency", "Awarding Sub Agency", "Description"],
+            }
+            r = requests.post(
+                "https://api.usaspending.gov/api/v2/search/spending_by_award/",
+                json=payload,
+                headers={**HEADERS, "Content-Type": "application/json"},
+                timeout=20,
+            )
+            if r.status_code != 200:
+                continue
+            for award in r.json().get("results", []):
+                end_str = (award.get("End Date", "") or "")[:10]
+                if not end_str:
+                    continue
+                try:
+                    end_dt    = datetime.strptime(end_str, "%Y-%m-%d")
+                    days_left = (end_dt - today).days
+                    if days_left < 0 or days_left > 365:
+                        continue
+                    urgency  = ("🔴 Expires < 90d" if days_left < 90
+                                else "🟡 Expires < 180d" if days_left < 180
+                                else "🟢 Expires < 1yr")
+                    agency   = award.get("Awarding Agency", "")
+                    amount   = award.get("Award Amount", 0) or 0
+                    desc     = (award.get("Description", "") or "")[:150]
+                    award_id = award.get("Award ID", "")
+                    items_out.append({
+                        "competitor": f"{comp_name} — Recompete Alert",
+                        "title":  f"{urgency} | {comp_name} @ {agency} — ${amount:,.0f}",
+                        "url":    clean_url(f"https://www.usaspending.gov/award/{award_id}/",
+                                            "https://www.usaspending.gov"),
+                        "source": "USASpending.gov",
+                        "date":   end_str,
+                        "summary": f"Contract ends {end_str} ({days_left}d). {desc}",
+                        "is_recompete": True,
+                        "days_left": days_left,
+                    })
+                except Exception:
+                    continue
+            time.sleep(0.3)
+        except Exception as e:
+            print(f"[Recompetes] {comp_name}: {e}")
+
+    print(f"[Competitor Intel] {len(items_out)} signals")
+    return items_out
+
+
+# ---------------------------------------------------------------------------
+# GRANTS / FEDERAL FUNDING
+# ---------------------------------------------------------------------------
+def fetch_federal_funding() -> list[dict]:
+    items, seen = [], set()
+    today = datetime.utcnow()
+    since = (today - timedelta(days=10))
+    TECH_TERMS = [
+        "law enforcement technology grant", "public safety technology grant",
+        "criminal justice data analytics", "records management system grant",
+        "community supervision technology", "offender management system",
+        "crime gun intelligence center", "digital evidence management",
+    ]
+    CUSTOMER_TERMS = [
+        "byrne jag", "edward byrne", "justice assistance grant",
+        "cops office technology", "community oriented policing",
+        "second chance act", "justice reinvestment initiative",
+        "violence reduction", "community violence intervention",
+        "smart policing initiative", "data-driven policing",
+        "homeland security grant program",
+    ]
+    GRANT_EXCLUSIONS = [
+        "treatment court", "drug court", "mental health court",
+        "substance abuse treatment", "behavioral health", "mental health services",
+        "victim services", "victim compensation", "domestic violence shelter",
+        "housing assistance", "homeless", "nutrition", "food bank",
+        "scholarship", "fellowship", "research only",
+        "road", "bridge", "wildfire", "flood", "hurricane",
+        "healthcare", "dental", "hospital", "public health",
+        "body armor", "equipment purchase", "vehicle", "construction",
+    ]
+    TECH_SIGNALS = [
+        "technology", "software", "data analytics", "data platform",
+        "information system", "digital", "analytics platform",
+        "records management", "information technology", "data-driven",
+    ]
+    PROGRAM_SIGNALS = [
+        "byrne jag", "edward byrne", "justice assistance",
+        "cops office", "second chance act", "justice reinvestment",
+        "violence reduction", "community violence intervention",
+        "smart policing", "nibin", "crime gun", "data-driven policing",
+    ]
+    for kw in TECH_TERMS + CUSTOMER_TERMS:
+        try:
+            r = requests.post(
+                "https://apply07.grants.gov/grantsws/rest/opportunities/search/",
+                json={"keyword": kw, "oppStatuses": "posted", "rows": 8, "sortBy": "openDate|desc"},
+                headers={"Content-Type": "application/json", "User-Agent": HEADERS["User-Agent"]},
+                timeout=20,
+            )
+            if r.status_code != 200:
+                continue
+            for opp in r.json().get("oppHits", []):
+                opp_id   = str(opp.get("id", ""))
+                if opp_id in seen:
+                    continue
+                title    = (opp.get("title", "") or "").strip()
+                synopsis = (opp.get("synopsis", "") or "").strip()
+                agency   = (opp.get("agencyName", "") or "").strip()
+                combined = f"{title} {synopsis}".lower()
+                if any(excl in combined for excl in GRANT_EXCLUSIONS):
+                    continue
+                if not any(s in combined for s in TECH_SIGNALS) and \
+                   not any(p in combined for p in PROGRAM_SIGNALS):
+                    continue
+                seen.add(opp_id)
+                is_tech = kw in TECH_TERMS
+                items.append({
+                    "type":       "🎯 Direct Tech Grant" if is_tech else "💰 Customer Budget Signal",
+                    "title":      title,
+                    "agency":     agency,
+                    "number":     opp.get("number", ""),
+                    "open_date":  opp.get("openDate", ""),
+                    "close_date": opp.get("closeDate", ""),
+                    "summary":    synopsis[:350],
+                    "url":        clean_url(f"https://www.grants.gov/search-results-detail/{opp_id}",
+                                            "https://www.grants.gov"),
+                    "source":     "grants.gov",
+                    "relevance":  kw,
+                })
+            time.sleep(0.2)
+        except Exception as e:
+            print(f"[Funding] '{kw}': {e}")
+
+    seen_titles = set()
+    deduped = []
+    for item in items:
+        key = item["title"][:60].lower()
+        if key not in seen_titles:
+            seen_titles.add(key)
+            deduped.append(item)
+    deduped.sort(key=lambda x: x.get("open_date", ""), reverse=True)
+    print(f"[Federal Funding] {len(deduped)} relevant grants")
+    return deduped[:15]
+
+
+def fetch_agency_budget_news() -> list[dict]:
+    items, seen = [], set()
+    BUDGET_QUERIES = [
+        ("DOJ Budget",       "Department+of+Justice+budget+technology+data+analytics"),
+        ("ATF Technology",   "ATF+Alcohol+Tobacco+Firearms+technology+data"),
+        ("FBI Technology",   "FBI+technology+data+analytics+platform"),
+        ("DHS Budget",       "Department+of+Homeland+Security+budget+technology"),
+        ("ICE Technology",   "ICE+immigration+enforcement+technology+data"),
+        ("CISA Budget",      "CISA+cybersecurity+budget+technology"),
+        ("Byrne JAG News",   "Byrne+JAG+grant+law+enforcement+technology"),
+        ("Violence Reduction","community+violence+intervention+grant+technology"),
+        ("NIBIN Funding",    "NIBIN+crime+gun+intelligence+funding+ATF"),
+    ]
+    for label, query in BUDGET_QUERIES:
+        url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
+        try:
+            r = requests.get(url, headers={
+                "User-Agent": "Mozilla/5.0 (compatible; PeregrineScanner/2.0)",
+                "Accept": "application/rss+xml, application/xml, text/xml",
+            }, timeout=15)
+            if r.status_code != 200:
+                continue
+            root = ET.fromstring(r.content)
+            count = 0
+            for item in root.findall(".//item"):
+                if count >= 2:
+                    break
+                t_el = item.find("title")
+                l_el = item.find("link")
+                d_el = item.find("description")
+                p_el = item.find("pubDate")
+                title = (t_el.text or "").strip() if t_el is not None else ""
+                desc  = unescape(re.sub(r"<[^>]+>", "", (d_el.text or ""))).strip() if d_el is not None else ""
+                url_  = (l_el.text or "").strip() if l_el is not None else ""
+                date_ = (p_el.text or "").strip() if p_el is not None else ""
+                if not title or title in seen:
+                    continue
+                seen.add(title)
+                items.append({
+                    "label": label, "title": title, "summary": desc[:280],
+                    "url": clean_url(url_, ""), "date": date_[:16], "source": "Google News",
+                })
+                count += 1
+            time.sleep(0.2)
+        except Exception as e:
+            print(f"[BudgetNews] {label}: {e}")
+    print(f"[Agency Budget News] {len(items)} signals")
+    return items[:20]
+
+
+# ---------------------------------------------------------------------------
+# EMAIL BUILDING
+# ---------------------------------------------------------------------------
+def deduplicate_and_rank(opps: list) -> list:
+    seen = set()
+    out  = []
+    for o in sorted(opps, key=lambda x: x.score, reverse=True):
+        if is_expired(o):
+            continue
+        key = o.notice_id or o.title[:60].lower()
+        if key not in seen:
+            seen.add(key)
+            out.append(o)
+    return out
+
+
+def build_section(title: str, opps: list) -> str:
+    if not opps:
+        return ""
+    rows = ""
+    for o in opps[:20]:
+        link = (f'<a href="{o.url}" style="font-weight:700;font-size:14px;color:#0057b8;text-decoration:none;">{o.title[:120]}</a>'
+                if o.url else f'<span style="font-weight:700;font-size:14px;color:#333;">{o.title[:120]}</span>')
+        reasons_html = ""
+        if o.score_reasons:
+            bullets = "".join(f"<li>{r}</li>" for r in o.score_reasons[:4])
+            reasons_html = f'<ul style="margin:4px 0 0 0;padding-left:18px;font-size:12px;color:#555;">{bullets}</ul>'
+        deadline = ""
+        if o.response_date and o.response_date != "TBD":
+            try:
+                d = parse_date_flexible(o.response_date)
+                if d:
+                    days = (d - datetime.utcnow()).days
+                    if days <= 7:
+                        deadline = f' <span style="background:#c0392b;color:#fff;font-size:10px;padding:1px 6px;border-radius:8px;">Due in {days}d</span>'
+                    elif days <= 30:
+                        deadline = f' <span style="background:#e67e22;color:#fff;font-size:10px;padding:1px 6px;border-radius:8px;">Due in {days}d</span>'
+            except Exception:
+                pass
+        rows += f"""
+        <div style="border:1px solid #e8e8e8;border-radius:6px;padding:12px;margin-bottom:10px;background:#fff;">
+          <div style="margin-bottom:6px;">{link}{deadline}</div>
+          <div style="font-size:12px;color:#666;">🏛 {o.agency[:80]} &nbsp;·&nbsp; 📬 Posted: {o.posted_date[:10]}</div>
+          <div style="font-size:11px;color:#999;margin-top:2px;">
+            Source: {o.source} &nbsp;·&nbsp; Score: {o.score}pts &nbsp;·&nbsp;
+            <a href="{o.url}" style="color:#0057b8;">View on SAM.gov</a>
+          </div>
+          {reasons_html}
+        </div>"""
+    return f"""
+    <div style="margin:20px 0 6px">
+      <h2 style="font-size:16px;color:#222;border-bottom:2px solid #eee;padding-bottom:5px;">{title} ({len(opps)})</h2>
+      {rows}
+    </div>"""
+
+
+def build_award_intel_section(awards: list) -> str:
+    if not awards:
+        return ""
+    rows = ""
+    for o in awards[:5]:
+        rows += f"""
+        <div style="border-left:3px solid #95a5a6;padding:8px 10px;margin-bottom:8px;background:#f9f9f9;">
+          <div style="font-size:13px;font-weight:600;color:#333;">{o.title[:100]}</div>
+          <div style="font-size:11px;color:#888;">{o.agency[:70]} · {o.posted_date[:10]}</div>
+        </div>"""
+    return f"""
+    <div style="margin:20px 0 6px">
+      <h2 style="font-size:16px;color:#222;border-bottom:2px solid #eee;padding-bottom:5px;">📊 Award Intel — Recent Contract Wins</h2>
+      {rows}
+    </div>"""
+
+
+def _grant_why_it_fits(item: dict) -> list:
+    title  = (item.get("title","") or "").lower()
+    summ   = (item.get("summary","") or "").lower()
+    rele   = (item.get("relevance","") or "").lower()
+    rtype  = (item.get("type","") or "").lower()
+    text   = f" {title} {summ} {rele} "
+    reasons = []
+    if "direct tech" in rtype:
+        reasons.append(("🎯","Direct Technology Grant","Funding for software/data platform procurement"))
+    else:
+        reasons.append(("💰","Customer Budget Signal","Funding flowing to agencies that buy Peregrine"))
+    cap_checks = [
+        (("data integrat","data analytics","data platform","information sharing"),
+         "⬡","Data Integration","Peregrine unifies data from RMS, CAD, jail, court, and federal systems"),
+        (("investigative","crime analytics","intelligence platform","link analysis","digital evidence"),
+         "◎","Investigative Analytics","Peregrine surfaces patterns and links for investigators"),
+        (("community supervision","probation","parole","offender management","reentry","second chance","corrections"),
+         "⬡","Corrections & Supervision","Peregrine deployed at CSOSA for offender data analytics"),
+        (("law enforcement","public safety","police","fusion center","records management"),
+         "⬟","Public Safety","Direct LE agency funding — Peregrine's primary buyer"),
+        (("byrne jag","bjag","edward byrne","justice assistance"),
+         "💵","Byrne JAG","Most flexible LE grant — agencies routinely use for analytics platforms"),
+        (("cops office","community oriented policing"),
+         "👮","COPS Office","COPS grants fund technology and data systems"),
+        (("violence reduction","gun violence","antiviolence","nibin"),
+         "🎯","Violence Reduction","Funds NIBIN/analytics platforms Peregrine provides to ATF"),
+        (("second chance","reentry","recidivism","justice reinvestment"),
+         "🔄","Reentry/Justice Reform","Funds supervision tech and offender data systems"),
+    ]
+    for terms, icon, cname, desc in cap_checks:
+        if any(t in text for t in terms):
+            reasons.append((icon, cname, desc))
+    seen = set()
+    deduped = []
+    for r in reasons:
+        if r[1] not in seen:
+            seen.add(r[1])
+            deduped.append(r)
+    return deduped[:4]
+
+
+def build_funding_section(funding_items: list) -> str:
+    if not funding_items:
+        return """
+        <div style="margin:20px 0 6px">
+          <h2 style="font-size:16px;color:#222;border-bottom:2px solid #eee;padding-bottom:5px;">💰 Federal Funding Opportunities</h2>
+          <p style="color:#aaa;font-size:13px;font-style:italic">No relevant funding in last 10 days.</p>
+        </div>"""
+    rows = ""
+    for item in funding_items[:12]:
+        badge_color = "#27ae60" if "Direct" in item["type"] else "#0057b8"
+        badge_text  = item["type"].replace("🎯 ","").replace("💰 ","")
+        close_html  = f' &middot; <strong>Closes:</strong> {item["close_date"]}' if item.get("close_date") else ""
+        link = (f'<a href="{item["url"]}" style="font-weight:700;font-size:14px;color:#0057b8;text-decoration:none;">{item["title"][:110]}</a>'
+                if item.get("url") else f'<span style="font-weight:700;font-size:14px;color:#333;">{item["title"][:110]}</span>')
+        reasons = _grant_why_it_fits(item)
+        why_html = ""
+        if reasons:
+            bullets = "".join(
+                f'<li><strong>{ico} {lbl}:</strong> {dsc}</li>'
+                for ico, lbl, dsc in reasons
+            )
+            why_html = (
+                '<div style="margin-top:8px;padding:8px 10px;background:#f8fafe;'
+                'border-left:3px solid #0057b8;border-radius:0 4px 4px 0;">'
+                '<div style="font-size:11px;font-weight:700;color:#0057b8;margin-bottom:4px;'
+                'text-transform:uppercase;letter-spacing:0.5px;">Why It Fits</div>'
+                f'<ul style="margin:0;padding-left:16px;font-size:12px;line-height:1.6;">{bullets}</ul>'
+                '</div>'
+            )
+        rows += (
+            '<div style="border:1px solid #e8e8e8;border-radius:6px;padding:12px;margin-bottom:10px;background:#fff;">'
+            '<div style="margin-bottom:6px;">'
+            f'<span style="background:{badge_color};color:#fff;font-size:10px;font-weight:700;'
+            f'padding:2px 7px;border-radius:10px;">{badge_text}</span>'
+            f'<span style="font-size:11px;color:#888;margin-left:8px;">'
+            f'{item["source"]} &middot; {item.get("open_date","")[:10]}</span>'
+            '</div>'
+            f'<div style="margin-bottom:4px;">{link}</div>'
+            f'<div style="font-size:12px;color:#666;margin-bottom:4px;">'
+            f'&#x1F3DB; {item["agency"][:90]}{close_html}</div>'
+            + (f'<div style="font-size:12px;color:#555;line-height:1.5;">{item.get("summary","")[:280]}</div>'
+               if item.get("summary") else "")
+            + why_html + '</div>'
+        )
+    return (
+        '<div style="margin:20px 0 6px">'
+        f'<h2 style="font-size:16px;color:#222;border-bottom:2px solid #eee;padding-bottom:5px;">'
+        f'&#x1F4B0; Federal Funding — Last 10 Days ({len(funding_items)})</h2>'
+        '<p style="font-size:12px;color:#888;margin:0 0 10px;">'
+        'Direct tech grants &middot; Customer budget signals</p>'
+        f'{rows}</div>'
+    )
+
+
+def build_budget_news_section(budget_news: list) -> str:
+    if not budget_news:
+        return ""
+    from collections import defaultdict
+    grouped = defaultdict(list)
+    for item in budget_news:
+        grouped[item["label"]].append(item)
+    rows = ""
+    for label in sorted(grouped.keys()):
+        for s in grouped[label][:2]:
+            link = (f'<a href="{s["url"]}" style="color:#0057b8;text-decoration:none;font-weight:600;">{s["title"][:95]}</a>'
+                    if s.get("url") else f'<span style="font-weight:600;">{s["title"][:95]}</span>')
+            rows += (
+                f'<div style="margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid #f0f0f0;">'
+                f'<div style="font-size:12px;font-weight:700;color:#555;margin-bottom:2px;">📡 {label}</div>'
+                f'<div style="font-size:13px;">{link}</div>'
+                f'<div style="font-size:11px;color:#888;">{s["source"]} &middot; {s["date"][:10]}</div>'
+                f'{"<div style=\"font-size:12px;color:#555;margin-top:2px;\">" + s.get("summary","")[:180] + "</div>" if s.get("summary") else ""}'
+                f'</div>'
+            )
+    return (
+        '<div style="margin:20px 0 6px">'
+        f'<h2 style="font-size:16px;color:#222;border-bottom:2px solid #eee;padding-bottom:5px;">'
+        f'&#x1F4E1; Agency Budget &amp; Spending Signals ({len(budget_news)})</h2>'
+        f'{rows}</div>'
+    )
+
+
+def build_competitor_section(intel_items: list, growth_items: list = None) -> str:
+    palantir_rc = sorted(
+        [i for i in intel_items if i.get("is_recompete") and "Palantir" in i.get("competitor","")],
+        key=lambda x: x.get("days_left", 999)
+    )
+    other_rc = sorted(
+        [i for i in intel_items if i.get("is_recompete") and "Palantir" not in i.get("competitor","")],
+        key=lambda x: x.get("days_left", 999)
+    )
+    news_stories = [i for i in intel_items if not i.get("is_recompete")]
+
+    def _rc_rows(rcs):
+        rows = ""
+        for rc in rcs[:6]:
+            link = (f'<a href="{rc["url"]}" style="font-weight:700;color:#c0392b;text-decoration:none;">{rc["title"][:120]}</a>'
+                    if rc.get("url") else f'<span style="font-weight:700;color:#c0392b;">{rc["title"][:120]}</span>')
+            rows += (
+                '<div style="border-left:3px solid #c0392b;padding:8px 10px;margin-bottom:8px;'
+                'background:#fff9f9;border-radius:0 4px 4px 0;">'
+                f'<div style="font-size:13px;">{link}</div>'
+                f'<div style="font-size:11px;color:#888;">Expires: {rc["date"]} · {rc["source"]}</div>'
+                f'{"<div style=\"font-size:12px;color:#555;margin-top:2px;\">" + rc.get("summary","")[:200] + "</div>" if rc.get("summary") else ""}'
+                '</div>'
+            )
+        return rows
+
+    palantir_html = ""
+    if palantir_rc:
+        palantir_html = (
+            '<div style="margin-bottom:16px;border:1px solid #f5c6cb;border-radius:8px;padding:14px;background:#fff9f9;">'
+            f'<div style="font-weight:700;font-size:13px;color:#c0392b;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;">'
+            f'🎯 Palantir Recompete Opportunities ({len(palantir_rc)} expiring)</div>'
+            '<p style="font-size:12px;color:#666;margin:0 0 8px;">Active Palantir contracts expiring within 12 months — displacement opportunities for Peregrine.</p>'
+            f'{_rc_rows(palantir_rc)}</div>'
+        )
+
+    other_rc_html = ""
+    if other_rc:
+        other_rc_html = (
+            '<div style="margin-bottom:16px;">'
+            f'<div style="font-weight:700;font-size:13px;color:#e67e22;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;">'
+            f'⚡ Other Competitor Recompetes ({len(other_rc)} expiring)</div>'
+            f'{_rc_rows(other_rc)}</div>'
+        )
+
+    news_rows = ""
+    if news_stories:
+        from collections import defaultdict
+        grouped = defaultdict(list)
+        for item in news_stories:
+            grouped[item["competitor"]].append(item)
+        for comp_name in sorted(grouped.keys()):
+            stories = grouped[comp_name][:2]
+            story_html = ""
+            for s in stories:
+                link = (f'<a href="{s["url"]}" style="color:#0057b8;text-decoration:none;font-weight:600;">{s["title"][:90]}</a>'
+                        if s.get("url") else f'<span style="font-weight:600;color:#333;">{s["title"][:90]}</span>')
+                story_html += (
+                    '<div style="margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid #f0f0f0;">'
+                    f'<div style="font-size:13px;">{link}</div>'
+                    f'<div style="font-size:11px;color:#888;margin-top:2px;">{s["source"]} &middot; {s["date"][:10]}</div>'
+                    f'{"<div style=\"font-size:12px;color:#555;margin-top:2px;\">" + s.get("summary","")[:200] + "</div>" if s.get("summary") else ""}'
+                    '</div>'
+                )
+            news_rows += (
+                f'<div style="margin-bottom:14px;">'
+                f'<div style="font-weight:700;font-size:12px;color:#555;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;">⚔️ {comp_name}</div>'
+                f'{story_html}</div>'
+            )
+
+    total = len(palantir_rc) + len(other_rc) + len(news_stories)
+    return (
+        f'<div style="margin:20px 0 6px">'
+        f'<h2 style="font-size:16px;color:#222;border-bottom:2px solid #eee;padding-bottom:5px;">🔎 Competitor Intelligence ({total} signals)</h2>'
+        f'<p style="font-size:12px;color:#888;margin:0 0 12px;">Monitoring: {", ".join(c["name"] for c in COMPETITORS)}</p>'
+        f'{palantir_html}{other_rc_html}'
+        f'{news_rows if news_rows else "<p style=\"color:#aaa;font-size:13px;font-style:italic\">No competitor news today.</p>"}'
+        f'</div>'
+    )
+
+
+def build_news_section(news_items: list) -> str:
+    if not news_items:
+        return ""
+    rows = ""
+    for item in news_items[:10]:
+        link = (f'<a href="{item["url"]}" style="color:#0057b8;text-decoration:none;font-weight:600;">{item["title"][:100]}</a>'
+                if item.get("url") else f'<span style="font-weight:600;">{item["title"][:100]}</span>')
+        rows += (
+            f'<div style="margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid #f0f0f0;">'
+            f'<div style="font-size:13px;">{link}</div>'
+            f'<div style="font-size:11px;color:#888;margin-top:2px;">{item["source"]} &middot; {item["date"][:10]}</div>'
+            f'{"<div style=\"font-size:12px;color:#555;margin-top:2px;\">" + item.get("summary","")[:200] + "</div>" if item.get("summary") else ""}'
+            f'</div>'
+        )
+    return (
+        f'<div style="margin:20px 0 6px">'
+        f'<h2 style="font-size:16px;color:#222;border-bottom:2px solid #eee;padding-bottom:5px;">📰 Industry News &amp; Market Signals ({len(news_items)})</h2>'
+        f'{rows}</div>'
+    )
+
+
+def _possible_fits(non_events: list, tiers: dict, shown: set = None) -> list:
+    shown = shown or set()
+    def _k(o): return (o.notice_id or o.title[:60].lower()).strip()
+    def _unseen(lst): return [o for o in lst if _k(o) not in shown]
+    possible = _unseen([o for o in tiers.get("possible", []) if o.source != "Events Intelligence"])
+    if possible:
+        return possible
+    low = sorted(_unseen([o for o in non_events if o.tier == "⚪ Low Fit" and o.score > 0]),
+                 key=lambda x: x.score, reverse=True)
+    if low:
+        return low[:10]
+    TITLE_KW = ["analytics platform", "data platform", "software platform",
+                "analytics solution", "data integration", "law enforcement analytics"]
+    return sorted([o for o in _unseen(non_events)
+                   if o.tier not in ("⛔ Not a Fit", "⛔ Expired")
+                   and any(kw in o.title.lower() for kw in TITLE_KW)],
+                  key=lambda x: x.score, reverse=True)[:10]
+
+
+def build_html_email(opps: list, run_date: str,
+                     source_counts: dict = None,
+                     news_items: list = None,
+                     competitor_items: list = None,
+                     growth_items: list = None,
+                     funding_items: list = None,
+                     budget_news: list = None) -> str:
+
+    source_counts = source_counts or {}
+    non_events    = [o for o in opps if o.source != "Events Intelligence"]
+    events        = [o for o in opps if o.source == "Events Intelligence"]
+    usa_intel     = [o for o in non_events if o.source == "USASpending.gov"]
+    non_events    = [o for o in non_events if o.source != "USASpending.gov"]
+
+    def _key(o): return (o.notice_id or o.title[:60].lower()).strip()
+    def _dedup(lst):
+        seen = set(); out = []
+        for o in lst:
+            k = _key(o)
+            if k not in seen: seen.add(k); out.append(o)
+        return out
+
+    shown = set()
+    strong_list = _dedup([o for o in non_events if "Strong" in o.tier])
+    shown.update(_key(o) for o in strong_list)
+    good_list = _dedup([o for o in non_events if "Good" in o.tier and _key(o) not in shown])
+    shown.update(_key(o) for o in good_list)
+    possible_list = _dedup([o for o in non_events if "Possible" in o.tier and _key(o) not in shown])
+    shown.update(_key(o) for o in possible_list)
+    low_fit_list = _dedup([o for o in non_events if o.tier == "⚪ Low Fit" and o.score > 0 and _key(o) not in shown])
+    shown.update(_key(o) for o in low_fit_list)
+
+    tiers = {"strong": strong_list, "good": good_list, "possible": possible_list}
+
+    strong   = len(strong_list)
+    good     = len(good_list)
+    possible = len(possible_list)
+
+    sc_rows = "".join(
+        f'<tr><td style="padding:3px 10px;color:#555;font-size:12px;">{k}</td>'
+        f'<td style="padding:3px 10px;font-weight:700;color:#222;font-size:12px;">{v}</td></tr>'
+        for k, v in sorted(source_counts.items())
+    )
+
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{{font-family:'Helvetica Neue',Arial,sans-serif;background:#f5f5f5;margin:0;padding:0}}
+.wrap{{max-width:720px;margin:0 auto;background:#fff;border-radius:8px;overflow:hidden}}
+.header{{background:#0057b8;padding:24px 28px;color:#fff}}
+.content{{padding:20px 28px}}
+</style></head><body>
+<div class="wrap">
+<div class="header">
+  <div style="font-size:22px;font-weight:700;letter-spacing:-0.5px;">🦅 Peregrine Daily Scanner</div>
+  <div style="font-size:14px;opacity:0.85;margin-top:4px;">{run_date}</div>
+  <div style="margin-top:12px;display:flex;gap:16px;flex-wrap:wrap;">
+    <span style="background:rgba(255,255,255,0.2);padding:4px 12px;border-radius:20px;font-size:13px;font-weight:700;">🟢 {strong} Strong</span>
+    <span style="background:rgba(255,255,255,0.2);padding:4px 12px;border-radius:20px;font-size:13px;font-weight:700;">🟡 {good} Good</span>
+    <span style="background:rgba(255,255,255,0.2);padding:4px 12px;border-radius:20px;font-size:13px;font-weight:700;">🔵 {possible} Possible</span>
+  </div>
+</div>
+<div class="content">
+  <details style="margin-bottom:16px;border:1px solid #eee;border-radius:6px;padding:8px 12px;">
+    <summary style="font-size:12px;color:#888;cursor:pointer;">Sources searched today</summary>
+    <table style="margin-top:8px;border-collapse:collapse;">{sc_rows}</table>
+  </details>
+
+  {build_section("🟢 Strong Fit — Act Now", strong_list)}
+  {build_section("🟡 Good Fit — Review Today", good_list)}
+  {build_section("🔵 Possible Fit — Review These", _possible_fits(non_events, tiers, shown))}
+  {build_section("⚪ Low Fit — Any Keyword Match", low_fit_list)}
+  {build_award_intel_section(usa_intel[:5])}
+  {build_competitor_section(competitor_items or [], growth_items=growth_items or [])}
+  {build_funding_section(funding_items or [])}
+  {build_budget_news_section(budget_news or [])}
+  {build_news_section(news_items or [])}
+  {build_section("🎤 Events & Conferences (Next 3 Months)", sorted(events, key=lambda x: x.score, reverse=True))}
+</div>
+</div></body></html>"""
+
+
+# ---------------------------------------------------------------------------
+# EMAIL SEND
+# ---------------------------------------------------------------------------
+def send_email(html_body: str, subject: str):
+    api_key  = os.environ.get("SENDGRID_API_KEY", "")
+    email_to = os.environ.get("EMAIL_TO", "mike.kelly@peregrine.io")
+    email_from = os.environ.get("EMAIL_FROM", "mikefkelly26@gmail.com")
+    if not api_key:
+        print("[Email] No SENDGRID_API_KEY — skipping send")
+        return
+    payload = {
+        "personalizations": [{"to": [{"email": email_to}]}],
+        "from": {"email": email_from, "name": "Peregrine Federal Scanner"},
+        "subject": subject,
+        "content": [{"type": "text/html", "value": html_body}],
+    }
+    try:
+        r = requests.post(
+            "https://api.sendgrid.com/v3/mail/send",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=payload, timeout=30,
+        )
+        if r.status_code in (200, 202):
+            print(f"[Email] Sent to {email_to} ✓")
+        else:
+            print(f"[Email] Send failed: {r.status_code} {r.text[:200]}")
+    except Exception as e:
+        print(f"[Email] Error: {e}")
+
+
+# ---------------------------------------------------------------------------
+# MAIN
+# ---------------------------------------------------------------------------
+def main():
+    today    = datetime.utcnow()
+    run_date = today.strftime("%B %d, %Y")
+    print(f"\n{'='*60}")
+    print(f"  Peregrine Daily Scanner — {run_date}")
+    print(f"{'='*60}")
+
+    SAM_KEY = os.environ.get("SAM_API_KEY", "")
+    SG_KEY  = os.environ.get("SENDGRID_API_KEY", "")
+    ET_TO   = os.environ.get("EMAIL_TO", "mike.kelly@peregrine.io")
+    ET_FROM = os.environ.get("EMAIL_FROM", "mikefkelly26@gmail.com")
+    print(f"[Config] SAM_API_KEY set:      {'YES' if SAM_KEY else 'NO'}")
+    print(f"[Config] SENDGRID_API_KEY set: {'YES' if SG_KEY else 'NO'}")
+    print(f"[Config] EMAIL_TO:             {ET_TO}")
+    print(f"[Config] EMAIL_FROM:           {ET_FROM}")
+
+    source_counts = {}
+    all_opps      = []
+
+    sources = [
+        ("SAM.gov",           fetch_sam_gov),
+        ("DOJ",               fetch_doj_opportunities),
+        ("DHS",               fetch_dhs_opportunities),
+        ("DoD",               fetch_dod_opportunities),
+        ("Federal Register",  fetch_federal_register),
+        ("USASpending.gov",   fetch_usaspending_intel),
+        ("Agency RSS",        fetch_agency_rss_feeds),
+        ("Events",            fetch_events_intelligence),
+    ]
+    for label, fn in sources:
+        print(f"\n[{label}] Fetching...")
+        try:
+            batch = fn()
+            source_counts[label] = len(batch)
+            all_opps.extend(batch)
+            # Populate cache after SAM.gov runs
+            if label == "SAM.gov":
+                _SAM_RESULTS_CACHE.clear()
+                _SAM_RESULTS_CACHE.extend(batch)
+        except Exception as e:
+            print(f"[{label}] FAILED: {e}")
+            source_counts[label] = 0
+
+    print(f"\n[Scoring] Deduplicating and ranking {len(all_opps)} raw opportunities...")
+    ranked = deduplicate_and_rank(all_opps)
+    print(f"[Scoring] {len(ranked)} unique active opportunities after dedup")
+
+    strong   = sum(1 for o in ranked if "Strong" in o.tier)
+    good     = sum(1 for o in ranked if "Good" in o.tier)
+    possible = sum(1 for o in ranked if "Possible" in o.tier)
+    print(f"[Tiers] 🟢 Strong: {strong}  🟡 Good: {good}  🔵 Possible: {possible}")
+
+    print("\n[Industry News] Fetching...")
+    try:
+        news_items = fetch_industry_news()
+        source_counts["Industry News"] = len(news_items)
+    except Exception as e:
+        print(f"[Industry News] FAILED: {e}")
+        news_items = []
+
+    print("\n[Competitor Intel] Fetching...")
+    try:
+        competitor_items = fetch_competitor_intel()
+        source_counts["Competitor Intel"] = len(competitor_items)
+    except Exception as e:
+        print(f"[Competitor Intel] FAILED: {e}")
+        competitor_items = []
+
+    growth_items = []
+    if not competitor_items:
+        try:
+            growth_items = fetch_growth_news()
+        except Exception as e:
+            print(f"[Growth News] FAILED: {e}")
+
+    print("\n[Federal Funding] Fetching...")
+    try:
+        funding_items = fetch_federal_funding()
+        source_counts["Federal Funding"] = len(funding_items)
+    except Exception as e:
+        print(f"[Federal Funding] FAILED: {e}")
+        funding_items = []
+
+    print("\n[Budget News] Fetching...")
+    try:
+        budget_news = fetch_agency_budget_news()
+        source_counts["Budget News"] = len(budget_news)
+    except Exception as e:
+        print(f"[Budget News] FAILED: {e}")
+        budget_news = []
+
+    # Build subject
+    if strong == 0 and good == 0 and possible == 0:
+        subject = f"Peregrine Daily Scanner | No Matches Today | {today.strftime('%b %d')}"
+    elif strong >= 1:
+        subject = f"Peregrine Daily Scanner | {strong} Strong · {good} Good · {possible} Possible | {today.strftime('%b %d')}"
+    else:
+        subject = f"Peregrine Daily Scanner | {good} Good · {possible} Possible Fits | {today.strftime('%b %d')}"
+
+    html = build_html_email(
+        ranked, run_date, source_counts,
+        news_items=news_items,
+        competitor_items=competitor_items,
+        growth_items=growth_items,
+        funding_items=funding_items,
+        budget_news=budget_news,
+    )
+
+    send_email(html, subject)
+
+    fname = f"digest_{today.strftime('%Y%m%d')}.html"
+    with open(fname, "w", encoding="utf-8") as f:
+        f.write(html)
+    print(f"\n[Done] Digest saved: {fname}")
+    print(f"[Done] Subject: {subject}")
+
+
+if __name__ == "__main__":
+    main()
