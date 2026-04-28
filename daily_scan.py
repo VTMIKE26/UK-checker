@@ -1542,12 +1542,13 @@ def build_budget_news_section(budget_news: list) -> str:
         for s in grouped[label][:2]:
             link = (f'<a href="{s["url"]}" style="color:#0057b8;text-decoration:none;font-weight:600;">{s["title"][:95]}</a>'
                     if s.get("url") else f'<span style="font-weight:600;">{s["title"][:95]}</span>')
+            summary_html = ("<div style='font-size:12px;color:#555;margin-top:2px;'>" + s.get("summary","")[:180] + "</div>") if s.get("summary") else ""
             rows += (
                 f'<div style="margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid #f0f0f0;">'
-                f'<div style="font-size:12px;font-weight:700;color:#555;margin-bottom:2px;">📡 {label}</div>'
+                f'<div style="font-size:12px;font-weight:700;color:#555;margin-bottom:2px;">&#x1F4E1; {label}</div>'
                 f'<div style="font-size:13px;">{link}</div>'
                 f'<div style="font-size:11px;color:#888;">{s["source"]} &middot; {s["date"][:10]}</div>'
-                f'{"<div style=\"font-size:12px;color:#555;margin-top:2px;\">" + s.get("summary","")[:180] + "</div>" if s.get("summary") else ""}'
+                f'{summary_html}'
                 f'</div>'
             )
     return (
@@ -1574,12 +1575,13 @@ def build_competitor_section(intel_items: list, growth_items: list = None) -> st
         for rc in rcs[:6]:
             link = (f'<a href="{rc["url"]}" style="font-weight:700;color:#c0392b;text-decoration:none;">{rc["title"][:120]}</a>'
                     if rc.get("url") else f'<span style="font-weight:700;color:#c0392b;">{rc["title"][:120]}</span>')
+            rc_summary = ("<div style='font-size:12px;color:#555;margin-top:2px;'>" + rc.get("summary","")[:200] + "</div>") if rc.get("summary") else ""
             rows += (
                 '<div style="border-left:3px solid #c0392b;padding:8px 10px;margin-bottom:8px;'
                 'background:#fff9f9;border-radius:0 4px 4px 0;">'
                 f'<div style="font-size:13px;">{link}</div>'
-                f'<div style="font-size:11px;color:#888;">Expires: {rc["date"]} · {rc["source"]}</div>'
-                f'{"<div style=\"font-size:12px;color:#555;margin-top:2px;\">" + rc.get("summary","")[:200] + "</div>" if rc.get("summary") else ""}'
+                f'<div style="font-size:11px;color:#888;">Expires: {rc["date"]} &middot; {rc["source"]}</div>'
+                f'{rc_summary}'
                 '</div>'
             )
         return rows
@@ -1615,11 +1617,12 @@ def build_competitor_section(intel_items: list, growth_items: list = None) -> st
             for s in stories:
                 link = (f'<a href="{s["url"]}" style="color:#0057b8;text-decoration:none;font-weight:600;">{s["title"][:90]}</a>'
                         if s.get("url") else f'<span style="font-weight:600;color:#333;">{s["title"][:90]}</span>')
+                ns_summary = ("<div style='font-size:12px;color:#555;margin-top:2px;'>" + s.get("summary","")[:200] + "</div>") if s.get("summary") else ""
                 story_html += (
                     '<div style="margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid #f0f0f0;">'
                     f'<div style="font-size:13px;">{link}</div>'
                     f'<div style="font-size:11px;color:#888;margin-top:2px;">{s["source"]} &middot; {s["date"][:10]}</div>'
-                    f'{"<div style=\"font-size:12px;color:#555;margin-top:2px;\">" + s.get("summary","")[:200] + "</div>" if s.get("summary") else ""}'
+                    f'{ns_summary}'
                     '</div>'
                 )
             news_rows += (
@@ -1629,12 +1632,13 @@ def build_competitor_section(intel_items: list, growth_items: list = None) -> st
             )
 
     total = len(palantir_rc) + len(other_rc) + len(news_stories)
+    monitoring = ", ".join(c["name"] for c in COMPETITORS)
+    news_or_fallback = news_rows or "<p style='color:#aaa;font-size:13px;font-style:italic'>No competitor news today.</p>"
     return (
         f'<div style="margin:20px 0 6px">'
-        f'<h2 style="font-size:16px;color:#222;border-bottom:2px solid #eee;padding-bottom:5px;">🔎 Competitor Intelligence ({total} signals)</h2>'
-        f'<p style="font-size:12px;color:#888;margin:0 0 12px;">Monitoring: {", ".join(c["name"] for c in COMPETITORS)}</p>'
-        f'{palantir_html}{other_rc_html}'
-        f'{news_rows if news_rows else "<p style=\"color:#aaa;font-size:13px;font-style:italic\">No competitor news today.</p>"}'
+        f'<h2 style="font-size:16px;color:#222;border-bottom:2px solid #eee;padding-bottom:5px;">&#x1F50E; Competitor Intelligence ({total} signals)</h2>'
+        f'<p style="font-size:12px;color:#888;margin:0 0 12px;">Monitoring: {monitoring}</p>'
+        f'{palantir_html}{other_rc_html}{news_or_fallback}'
         f'</div>'
     )
 
@@ -1646,11 +1650,12 @@ def build_news_section(news_items: list) -> str:
     for item in news_items[:10]:
         link = (f'<a href="{item["url"]}" style="color:#0057b8;text-decoration:none;font-weight:600;">{item["title"][:100]}</a>'
                 if item.get("url") else f'<span style="font-weight:600;">{item["title"][:100]}</span>')
+        ni_summary = (("<div style='font-size:12px;color:#555;margin-top:2px;'>" + item.get("summary","")[:200] + "</div>") if item.get("summary") else "")
         rows += (
             f'<div style="margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid #f0f0f0;">'
             f'<div style="font-size:13px;">{link}</div>'
             f'<div style="font-size:11px;color:#888;margin-top:2px;">{item["source"]} &middot; {item["date"][:10]}</div>'
-            f'{"<div style=\"font-size:12px;color:#555;margin-top:2px;\">" + item.get("summary","")[:200] + "</div>" if item.get("summary") else ""}'
+            f'{ni_summary}'
             f'</div>'
         )
     return (
