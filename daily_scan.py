@@ -581,47 +581,60 @@ _SAM_RATE_LIMITED = [False]  # global flag — stops all SAM calls on 429
 _SAM_RESULTS_CACHE: list = []  # shared cache — DOJ/DHS filter from this
 
 def _sam_search(extra_params: dict, label: str,
-                seen_ids: set, results: list) -> bool:
-    """One SAM.gov search call. Returns False if rate limited."""
+                seen_ids: set, results: list,
+                pages: int = 1) -> bool:
+    """SAM.gov search with optional pagination. Returns False if rate limited."""
     if _SAM_RATE_LIMITED[0]:
         return False
-    try:
-        r = requests.get(
-            "https://api.sam.gov/opportunities/v2/search",
-            params={"api_key": SAM_API_KEY, "active": "Yes",
-                    "limit": 100, **extra_params},
-            headers=HEADERS, timeout=15,  # 15s max per call
-        )
-        if r.status_code == 429:
-            print(f"[SAM.gov] Rate limit hit — pausing all SAM calls ({label})")
-            _SAM_RATE_LIMITED[0] = True
-            return False
-        if r.status_code != 200:
-            return True  # skip bad responses, keep going
-        for item in r.json().get("opportunitiesData", []):
-            nid = item.get("noticeId") or item.get("id") or ""
-            if not nid or nid in seen_ids:
-                continue
-            seen_ids.add(nid)
-            results.append(score_opportunity(Opportunity(
-                title         = item.get("title", "Untitled"),
-                notice_id     = nid,
-                agency        = (item.get("fullParentPathName")
-                                 or item.get("departmentName") or "Unknown"),
-                posted_date   = item.get("postedDate", ""),
-                response_date = item.get("responseDeadLine", "TBD"),
-                description   = (item.get("description") or "")[:2000],
-                url           = clean_url(f"https://sam.gov/opp/{nid}/view",
-                                          "https://sam.gov/search"),
-                opp_type      = item.get("type") or "Notice",
-                source        = "SAM.gov",
-                naics         = item.get("naicsCode", ""),
-            )))
-        time.sleep(0.2)
-        return True
-    except Exception as e:
-        print(f"[SAM.gov] {label}: {e}")
-        return True
+    for page in range(pages):
+        if _SAM_RATE_LIMITED[0]:
+            break
+        try:
+            params = {"api_key": SAM_API_KEY, "active": "Yes",
+                      "limit": 100, "offset": page * 100, **extra_params}
+            r = requests.get(
+                "https://api.sam.gov/opportunities/v2/search",
+                params=params, headers=HEADERS, timeout=15,
+            )
+            if r.status_code == 429:
+                print(f"[SAM.gov] Rate limit — stopping ({label})")
+                _SAM_RATE_LIMITED[0] = True
+                return False
+            if r.status_code != 200:
+                return True
+            data  = r.json()
+            items = data.get("opportunitiesData", [])
+            new_count = 0
+            for item in items:
+                nid = item.get("noticeId") or item.get("id") or ""
+                if not nid or nid in seen_ids:
+                    continue
+                seen_ids.add(nid)
+                new_count += 1
+                results.append(score_opportunity(Opportunity(
+                    title         = item.get("title", "Untitled"),
+                    notice_id     = nid,
+                    agency        = (item.get("fullParentPathName")
+                                     or item.get("departmentName") or "Unknown"),
+                    posted_date   = item.get("postedDate", ""),
+                    response_date = item.get("responseDeadLine", "TBD"),
+                    description   = (item.get("description") or "")[:2000],
+                    url           = clean_url(f"https://sam.gov/opp/{nid}/view",
+                                              "https://sam.gov/search"),
+                    opp_type      = item.get("type") or "Notice",
+                    source        = "SAM.gov",
+                    naics         = item.get("naicsCode", ""),
+                )))
+            if new_count:
+                print(f"[SAM.gov] {label} p{page+1}: {data.get('totalRecords',0)} total | {new_count} new")
+            if len(items) < 100:
+                break  # no more pages
+            time.sleep(0.2)
+        except Exception as e:
+            print(f"[SAM.gov] {label}: {e}")
+            return True
+    time.sleep(0.2)
+    return True
 
 
 def fetch_sam_gov() -> list[Opportunity]:
@@ -722,11 +735,6 @@ def fetch_sam_gov() -> list[Opportunity]:
     return results
 
 
-
-# ---------------------------------------------------------------------------
-# SAM RESULTS CACHE — populated by fetch_sam_gov, filtered by DOJ/DHS/DoD
-# ---------------------------------------------------------------------------
-_SAM_RESULTS_CACHE: list = []
 
 # DOD agency path fragments
 DOD_PATH_FRAGMENTS = [
