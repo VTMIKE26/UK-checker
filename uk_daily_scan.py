@@ -357,9 +357,9 @@ def fetch_find_tender(days_back: int = 30) -> list:
     params  = {
         "updatedFrom": from_dt,
         "updatedTo":   to_dt,
-        "stages":      "tender",
         "limit":       100,
     }
+    # No stages filter — fetch tender AND planning notices for pipeline coverage
     page    = 0
     cursor  = None
     rate_limited = False
@@ -465,15 +465,19 @@ def fetch_find_tender(days_back: int = 30) -> list:
             print(f"[FTS] Error: {e}")
             break
 
-    # Filter to only potentially relevant results before returning
-    # (scored or CPV prefix matches IT/LE)
+    # Return anything that scored > 0 via keyword matching OR has a relevant CPV code
+    # Also return low-fit items with relevant CPV so they appear in Low Fit section
     relevant = []
     for o in results:
         cpv_prefix = o.cpv_code[:3] if o.cpv_code else ""
         if o.score > 0 or cpv_prefix in ALWAYS_RELEVANT_CPV:
             relevant.append(o)
 
-    print(f"[FTS] {len(results)} total tenders fetched, {len(relevant)} relevant")
+    print(f"[FTS] {len(results)} total tenders fetched → {len(relevant)} relevant")
+    print(f"[FTS] Score breakdown: Strong={sum(1 for o in relevant if 'Strong' in o.tier)}, "
+          f"Good={sum(1 for o in relevant if 'Good' in o.tier)}, "
+          f"Possible={sum(1 for o in relevant if 'Possible' in o.tier)}, "
+          f"Low={sum(1 for o in relevant if o.tier == chr(9898)+' Low Fit')}")
     return relevant
 
 
@@ -1058,6 +1062,8 @@ def main():
         subject = f"Peregrine UK Scanner | {good} Good · {possible} Possible Fits | {today.strftime('%d %b')}"
 
     html = build_html_email(ranked, run_date, source_counts, competitor_items, news_items)
+    print(f"[Email] HTML size: {len(html):,} chars")
+    print(f"[Email] Subject:   {subject}")
     send_email(html, subject)
 
     fname = f"uk_digest_{today.strftime('%Y%m%d')}.html"
