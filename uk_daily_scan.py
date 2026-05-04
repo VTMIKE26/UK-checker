@@ -241,6 +241,25 @@ HARD_EXCLUSIONS = [
     # Training only (not software)
     "firearms training", "first aid training", "personal safety training",
     "physical training", "driver training",
+    # Maintenance contracts — hardware/equipment/facilities, not software
+    "maintenance contract", "support and maintenance", "break fix",
+    "maintenance and support", "annual support contract",
+    "software assurance",  # Microsoft/Oracle licence renewals, not platforms
+    "printer maintenance", "copier maintenance", "mfd maintenance",
+    "lift maintenance", "escalator maintenance",
+    "asset management contract", "reactive maintenance",
+    "planned preventive maintenance", "ppm contract",
+    # Network / connectivity — not Peregrine's market
+    "network maintenance", "network support contract",
+    "connectivity solution", "leased line", "mpls",
+    "telephony", "telephone system", "pbx", "voip system",
+    "mobile devices", "mobile phones contract",
+    # Physical security (not software analytics)
+    "access control installation", "intruder alarm",
+    "physical security", "manned guarding", "concierge",
+    # Licensing / reselling only
+    "software licence", "software licensing", "microsoft licence",
+    "oracle licence", "licence renewal", "saas subscription renewal",
 ]
 
 TIER_STRONG   = 40
@@ -924,7 +943,7 @@ body{{font-family:'Helvetica Neue',Arial,sans-serif;background:#f5f5f5;margin:0;
 <div class="wrap">
 <div class="header">
   <div style="font-size:11px;letter-spacing:2px;opacity:0.7;text-transform:uppercase;margin-bottom:4px;">🇬🇧 United Kingdom</div>
-  <div style="font-size:22px;font-weight:700;letter-spacing:-0.5px;">🦅 Peregrine UK Daily Scanner</div>
+  <div style="font-size:22px;font-weight:700;letter-spacing:-0.5px;">🇬🇧 Peregrine UK Daily Scanner</div>
   <div style="font-size:14px;opacity:0.85;margin-top:4px;">{run_date}</div>
   <div style="margin-top:12px;display:flex;gap:16px;flex-wrap:wrap;">
     <span style="background:rgba(255,255,255,0.2);padding:4px 12px;border-radius:20px;font-size:13px;font-weight:700;">🟢 {strong} Strong</span>
