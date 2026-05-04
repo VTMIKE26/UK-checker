@@ -1243,7 +1243,6 @@ body{{font-family:'Helvetica Neue',Arial,sans-serif;background:#f5f5f5;margin:0;
 </style></head><body>
 <div class="wrap">
 <div class="header">
-  <div style="font-size:11px;letter-spacing:2px;opacity:0.7;text-transform:uppercase;margin-bottom:4px;">🇬🇧 United Kingdom</div>
   <div style="font-size:22px;font-weight:700;letter-spacing:-0.5px;">🇬🇧 Peregrine UK Daily Scanner</div>
   <div style="font-size:14px;opacity:0.85;margin-top:4px;">{run_date}</div>
   <div style="margin-top:12px;display:flex;gap:16px;flex-wrap:wrap;">
@@ -1323,40 +1322,40 @@ def send_email(html_body: str, subject: str):
 # ---------------------------------------------------------------------------
 def main():
     today    = datetime.utcnow()
-    run_date = today.strftime("%d %B %Y")  # UK date format
-    print(f"\n{'='*60}")
-    print(f"  Peregrine UK Daily Scanner — {run_date}")
-    print(f"{'='*60}")
+    run_date = today.strftime("%d %B %Y")
+    sep = "=" * 60
+    print(f"\n{sep}")
+    print(f"  Peregrine UK Daily Scanner --- {run_date}")
+    print(f"{sep}")
     print(f"[Config] SENDGRID_API_KEY: {'SET' if SENDGRID_API_KEY else 'NOT SET'}")
     print(f"[Config] EMAIL_TO:         {EMAIL_TO}")
 
     source_counts = {}
     all_opps      = []
 
-    print("\n[Find a Tender] Fetching UK tenders (last 30 days)...")
-    try:
-        fts_opps = fetch_find_tender(days_back=30)
-        source_counts["Find a Tender"] = len(fts_opps)
-        all_opps.extend(fts_opps)
-    except Exception as e:
-        print(f"[Find a Tender] FAILED: {e}")
-        source_counts["Find a Tender"] = 0
-
-    print("\n[Contracts Finder] Fetching below-threshold opps...")
-    try:
-        cf_opps = fetch_contracts_finder(days_back=30)
-        source_counts["Contracts Finder"] = len(cf_opps)
-        all_opps.extend(cf_opps)
-    except Exception as e:
-        print(f"[Contracts Finder] FAILED: {e}")
-        source_counts["Contracts Finder"] = 0
+    opp_sources = [
+        ("Find a Tender",             lambda: fetch_find_tender(days_back=90)),
+        ("Contracts Finder",          lambda: fetch_contracts_finder(days_back=30)),
+        ("Public Contracts Scotland", fetch_public_contracts_scotland),
+        ("Digital Marketplace",       fetch_digital_marketplace),
+        ("MOD Defence Contracts",     fetch_mod_defence_contracts),
+    ]
+    for label, fn in opp_sources:
+        print(f"\n[{label}] Fetching...")
+        try:
+            batch = fn()
+            source_counts[label] = len(batch)
+            all_opps.extend(batch)
+        except Exception as e:
+            print(f"[{label}] FAILED: {e}")
+            source_counts[label] = 0
 
     print(f"\n[Scoring] Deduplicating {len(all_opps)} raw results...")
-    ranked = deduplicate_and_rank(all_opps)
+    ranked   = deduplicate_and_rank(all_opps)
     strong   = sum(1 for o in ranked if "Strong" in o.tier)
     good     = sum(1 for o in ranked if "Good" in o.tier)
     possible = sum(1 for o in ranked if "Possible" in o.tier)
-    print(f"[Tiers] 🟢 {strong} Strong  🟡 {good} Good  🔵 {possible} Possible")
+    print(f"[Tiers] Strong:{strong}  Good:{good}  Possible:{possible}")
 
     print("\n[UK Competitor Intel] Fetching...")
     try:
@@ -1366,6 +1365,14 @@ def main():
         print(f"[UK Competitor Intel] FAILED: {e}")
         competitor_items = []
 
+    print("\n[UK Government Grants] Fetching...")
+    try:
+        uk_grants = fetch_uk_government_grants()
+        source_counts["UK Grants"] = len(uk_grants)
+    except Exception as e:
+        print(f"[UK Grants] FAILED: {e}")
+        uk_grants = []
+
     print("\n[UK Industry News] Fetching...")
     try:
         news_items = fetch_uk_industry_news()
@@ -1374,13 +1381,12 @@ def main():
         print(f"[UK Industry News] FAILED: {e}")
         news_items = []
 
-    # Subject line
     if strong == 0 and good == 0:
-        subject = f"Peregrine UK Scanner | No Strong Matches Today | {today.strftime('%d %b')}"
+        subject = f"Peregrine UK Scanner | No Strong Matches | {today.strftime('%d %b')}"
     elif strong >= 1:
-        subject = f"Peregrine UK Scanner | {strong} Strong · {good} Good · {possible} Possible | {today.strftime('%d %b')}"
+        subject = f"Peregrine UK Scanner | {strong} Strong - {good} Good - {possible} Possible | {today.strftime('%d %b')}"
     else:
-        subject = f"Peregrine UK Scanner | {good} Good · {possible} Possible Fits | {today.strftime('%d %b')}"
+        subject = f"Peregrine UK Scanner | {good} Good - {possible} Possible | {today.strftime('%d %b')}"
 
     html = build_html_email(ranked, run_date, source_counts, competitor_items, news_items, uk_grants)
     print(f"[Email] HTML size: {len(html):,} chars")
