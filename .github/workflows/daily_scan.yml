@@ -1,9 +1,7 @@
 name: Peregrine UK Daily Scanner
 
 on:
-  # Primary trigger: cron-job.org calls this via workflow_dispatch at 7am GMT/BST
   workflow_dispatch:
-  # Backup: GitHub native cron at 7:20am GMT (UTC+0 in winter, UTC+1 in summer)
   schedule:
     - cron: '20 7 * * 1-5'   # 7:20 AM GMT (Nov-Mar)
     - cron: '20 6 * * 1-5'   # 7:20 AM BST (Mar-Oct)
@@ -31,7 +29,7 @@ jobs:
       - name: Run UK scanner
         env:
           SENDGRID_API_KEY: ${{ secrets.SENDGRID_API_KEY }}
-          EMAIL_TO:         ${{ secrets.UK_EMAIL_TO }}
+          EMAIL_TO:         ${{ secrets.EMAIL_TO }}
           EMAIL_FROM:       ${{ secrets.EMAIL_FROM }}
         run: python uk_daily_scan.py
 
@@ -47,6 +45,8 @@ jobs:
         if: failure()
         env:
           SENDGRID_API_KEY: ${{ secrets.SENDGRID_API_KEY }}
+          EMAIL_TO:         ${{ secrets.EMAIL_TO }}
+          EMAIL_FROM:       ${{ secrets.EMAIL_FROM }}
         run: |
           python - <<'PYEOF'
           import requests, os
@@ -56,7 +56,7 @@ jobs:
                      "Content-Type": "application/json"},
             json={
               "personalizations": [{"to": [{"email": os.environ.get("EMAIL_TO","")}],
-                                    "subject": "⚠️ Peregrine UK Scanner Failed Today"}],
+                                    "subject": "Peregrine UK Scanner Failed Today"}],
               "from": {"email": os.environ.get("EMAIL_FROM",""), "name": "Peregrine UK Scanner"},
               "content": [{"type": "text/plain",
                            "value": "The UK scanner failed. Check GitHub Actions."}],
