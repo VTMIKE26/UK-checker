@@ -11,6 +11,7 @@ Searches UK public procurement for opportunities matching Peregrine's
 Delivers a ranked HTML digest via SendGrid email.
 """
 
+from __future__ import annotations
 import os
 import re
 import time
@@ -19,6 +20,7 @@ import xml.etree.ElementTree as ET
 from html import unescape
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
+from typing import Optional
 
 import requests
 
@@ -306,7 +308,7 @@ def score_opportunity(opp: Opportunity) -> Opportunity:
     return opp
 
 
-def parse_deadline(date_str: str) -> datetime | None:
+def parse_deadline(date_str: str) -> Optional[datetime]:
     if not date_str:
         return None
     for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
@@ -945,26 +947,48 @@ body{{font-family:'Helvetica Neue',Arial,sans-serif;background:#f5f5f5;margin:0;
 
 
 def send_email(html_body: str, subject: str):
+    print(f"[Email] Preparing to send...")
+    print(f"[Email]   To:   {EMAIL_TO or 'NOT SET'}")
+    print(f"[Email]   From: {EMAIL_FROM or 'NOT SET'}")
+    print(f"[Email]   Key:  {'SET (' + str(len(SENDGRID_API_KEY)) + ' chars)' if SENDGRID_API_KEY else 'NOT SET'}")
+
     if not SENDGRID_API_KEY:
-        print("[Email] No SENDGRID_API_KEY — skipping send")
+        print("[Email] SKIPPED — no SENDGRID_API_KEY")
         return
+    if not EMAIL_TO:
+        print("[Email] SKIPPED — no EMAIL_TO")
+        return
+    if not EMAIL_FROM:
+        print("[Email] SKIPPED — no EMAIL_FROM")
+        return
+
+    payload = {
+        "personalizations": [{"to": [{"email": EMAIL_TO}]}],
+        "from":    {"email": EMAIL_FROM, "name": "Peregrine UK Scanner"},
+        "subject": subject,
+        "content": [{"type": "text/html", "value": html_body}],
+    }
     try:
         r = requests.post(
             "https://api.sendgrid.com/v3/mail/send",
             headers={"Authorization": f"Bearer {SENDGRID_API_KEY}",
                      "Content-Type": "application/json"},
-            json={
-                "personalizations": [{"to": [{"email": EMAIL_TO}]}],
-                "from":    {"email": EMAIL_FROM, "name": "Peregrine UK Scanner"},
-                "subject": subject,
-                "content": [{"type": "text/html", "value": html_body}],
-            },
+            json=payload,
             timeout=30,
         )
         if r.status_code in (200, 202):
-            print(f"[Email] Sent to {EMAIL_TO} ✓")
+            print(f"[Email] ✓ Sent successfully to {EMAIL_TO} (HTTP {r.status_code})")
         else:
-            print(f"[Email] Failed: {r.status_code} {r.text[:200]}")
+            print(f"[Email] ✗ Send failed — HTTP {r.status_code}")
+            print(f"[Email]   Response: {r.text[:500]}")
+            # Common causes:
+            # 401 = bad API key
+            # 403 = sender not verified in SendGrid
+            # 400 = malformed request
+            if r.status_code == 403:
+                print("[Email]   HINT: Sender address not verified in SendGrid.")
+                print(f"[Email]   Go to sendgrid.com → Settings → Sender Authentication")
+                print(f"[Email]   and verify: {EMAIL_FROM}")
     except Exception as e:
         print(f"[Email] Error: {e}")
 
