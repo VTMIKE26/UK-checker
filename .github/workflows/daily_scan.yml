@@ -1,23 +1,19 @@
-name: Peregrine Daily Federal Scanner
+name: Peregrine UK Daily Scanner
 
 on:
-  # Primary trigger: called by cron-job.org via workflow_dispatch
-  # cron-job.org hits: POST /repos/VTMIKE26/daily-Opps-Check/actions/workflows/daily_scan.yml/dispatches
-  # This fires at EXACTLY 7:00 AM EST/EDT every weekday — no GitHub queue delays
+  # Primary trigger: cron-job.org calls this via workflow_dispatch at 7am GMT/BST
   workflow_dispatch:
-
-  # Backup: GitHub native cron in case cron-job.org misses a day
-  # Scheduled slightly later (7:20am) so it only runs if dispatch didn't fire
+  # Backup: GitHub native cron at 7:20am GMT (UTC+0 in winter, UTC+1 in summer)
   schedule:
-    - cron: '20 12 * * 1-5'   # 7:20 AM EST backup (UTC 12:20)
-    - cron: '20 11 * * 1-5'   # 7:20 AM EDT backup (UTC 11:20)
+    - cron: '20 7 * * 1-5'   # 7:20 AM GMT (Nov-Mar)
+    - cron: '20 6 * * 1-5'   # 7:20 AM BST (Mar-Oct)
 
 concurrency:
-  group: peregrine-daily-scanner
+  group: peregrine-uk-scanner
   cancel-in-progress: false
 
 jobs:
-  daily-scan:
+  uk-daily-scan:
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -32,20 +28,19 @@ jobs:
       - name: Install dependencies
         run: pip install requests
 
-      - name: Run scanner
+      - name: Run UK scanner
         env:
-          SAM_API_KEY:      ${{ secrets.SAM_API_KEY }}
           SENDGRID_API_KEY: ${{ secrets.SENDGRID_API_KEY }}
-          EMAIL_TO:         mike.kelly@peregrine.io
-          EMAIL_FROM:       mikefkelly26@gmail.com
-        run: python daily_scan.py
+          EMAIL_TO:         ${{ secrets.UK_EMAIL_TO }}
+          EMAIL_FROM:       ${{ secrets.EMAIL_FROM }}
+        run: python uk_daily_scan.py
 
       - name: Upload digest
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: digest-${{ github.run_id }}
-          path: digest_*.html
+          name: uk-digest-${{ github.run_id }}
+          path: uk_digest_*.html
           retention-days: 30
 
       - name: Alert on failure
@@ -60,11 +55,11 @@ jobs:
             headers={"Authorization": f"Bearer {os.environ['SENDGRID_API_KEY']}",
                      "Content-Type": "application/json"},
             json={
-              "personalizations": [{"to": [{"email": "mike.kelly@peregrine.io"}],
-                                    "subject": "⚠️ Peregrine Scanner Failed Today"}],
-              "from": {"email": "mikefkelly26@gmail.com", "name": "Peregrine Scanner"},
+              "personalizations": [{"to": [{"email": os.environ.get("EMAIL_TO","")}],
+                                    "subject": "⚠️ Peregrine UK Scanner Failed Today"}],
+              "from": {"email": os.environ.get("EMAIL_FROM",""), "name": "Peregrine UK Scanner"},
               "content": [{"type": "text/plain",
-                           "value": "The scanner failed. Check: https://github.com/VTMIKE26/daily-Opps-Check/actions"}],
+                           "value": "The UK scanner failed. Check GitHub Actions."}],
             }
           )
           PYEOF
