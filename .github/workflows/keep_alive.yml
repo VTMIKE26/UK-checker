@@ -1,15 +1,12 @@
-name: Keep Workflows Active
-
-# Commits a timestamp every weekday to prevent GitHub disabling
-# scheduled workflows after 60 days of repo inactivity.
+name: Keep UK Workflows Active
 
 on:
   schedule:
-    - cron: '0 11 * * 1-5'   # 6:00 AM EST (UTC 11) — before scanner fires
+    - cron: '0 7 * * 1-5'   # 7:00 AM GMT — before scanner fires
   workflow_dispatch:
 
 concurrency:
-  group: peregrine-keep-alive
+  group: peregrine-uk-keep-alive
   cancel-in-progress: false
 
 jobs:
@@ -28,4 +25,4 @@ jobs:
           git config user.email "actions@github.com"
           git add .github/last_active.txt
           git diff --staged --quiet && echo "No change" || \
-            git commit -m "chore: keep-alive $(date -u '+%Y-%m-%d') [skip ci]" && git push
+            (git commit -m "chore: keep-alive $(date -u '+%Y-%m-%d') [skip ci]" && git push)
