@@ -152,7 +152,7 @@ CAPABILITY_CLUSTERS = [
             "custody suite", "custody management",
             "computer aided dispatch", "cad system",
             "serious and organised crime", "intelligence management",
-            "national intelligence model", "nim",
+            "national intelligence model",  # nim removed — matches "minimum","minimise"
             "fusion centre", "fusion center",
             "digital forensics", "digital investigation",
             "body worn video", "body worn camera", "bwv",
@@ -241,6 +241,10 @@ HARD_EXCLUSIONS = [
     # Training only (not software)
     "firearms training", "first aid training", "personal safety training",
     "physical training", "driver training",
+    # Grounds / environment / horticulture
+    "grounds maintenance", "grass maintenance", "hedge maintenance",
+    "horticulture", "arboriculture", "tree surgery",
+    "landscaping contract", "grounds keeping",
     # Maintenance contracts — hardware/equipment/facilities, not software
     "maintenance contract", "support and maintenance", "break fix",
     "maintenance and support", "annual support contract",
@@ -599,6 +603,279 @@ def fetch_contracts_finder(days_back: int = 30) -> list:
 
 
 # ---------------------------------------------------------------------------
+# SOURCE 3: CONTRACTS FINDER V2 API (correct search endpoint)
+# ---------------------------------------------------------------------------
+CF_SEARCH_URL = "https://www.contractsfinder.service.gov.uk/Published/Notice/OCDS/Search"
+
+# ---------------------------------------------------------------------------
+# SOURCE 3b: PUBLIC CONTRACTS SCOTLAND — RSS keyword feeds
+# PCS doesn't have a public JSON API but publishes keyword RSS feeds
+# ---------------------------------------------------------------------------
+def fetch_public_contracts_scotland() -> list:
+    """
+    Public Contracts Scotland — RSS feeds for keyword-matched notices.
+    Covers all Scottish public bodies: Scottish Government, Police Scotland,
+    NHS Scotland, 32 councils, Scottish Prison Service, COPFS, etc.
+    """
+    results  = []
+    seen_ids = set()
+    today    = datetime.utcnow()
+
+    # PCS keyword search RSS URLs
+    # Format: https://www.publiccontractsscotland.gov.uk/search/Search_Rss.aspx?term=KEYWORD
+    PCS_KEYWORDS = [
+        "data analytics",       "data integration",
+        "artificial intelligence", "machine learning",
+        "investigative platform", "digital evidence",
+        "community supervision",  "offender management",
+        "records management",     "IT modernisation",
+        "intelligence platform",  "predictive analytics",
+        "policing",               "criminal justice",
+        "federated search",       "entity resolution",
+    ]
+
+    for kw in PCS_KEYWORDS:
+        url = f"https://www.publiccontractsscotland.gov.uk/search/Search_Rss.aspx?term={requests.utils.quote(kw)}"
+        try:
+            r = requests.get(url, headers={
+                "User-Agent": HEADERS["User-Agent"],
+                "Accept": "application/rss+xml, application/xml, text/xml",
+            }, timeout=15)
+            if r.status_code != 200:
+                continue
+            root = ET.fromstring(r.content)
+            for item in root.findall(".//item")[:10]:
+                t_el = item.find("title")
+                l_el = item.find("link")
+                d_el = item.find("description")
+                g_el = item.find("guid")
+                p_el = item.find("pubDate")
+                title   = (t_el.text or "").strip() if t_el is not None else ""
+                desc    = unescape(re.sub(r"<[^>]+>","", (d_el.text or ""))).strip() if d_el is not None else ""
+                url_    = (l_el.text or "").strip() if l_el is not None else ""
+                guid    = (g_el.text or url_).strip() if g_el is not None else url_
+                posted  = (p_el.text or "").strip() if p_el is not None else ""
+                if not title or guid in seen_ids:
+                    continue
+                seen_ids.add(guid)
+                opp = Opportunity(
+                    title       = title,
+                    notice_id   = f"PCS-{guid[-20:]}",
+                    buyer       = desc[:60] if desc else "Scottish Public Body",
+                    posted_date = posted[:10] if posted else today.strftime("%Y-%m-%d"),
+                    deadline    = "TBD",
+                    description = f"{desc} Scotland procurement.",
+                    url         = clean_url(url_),
+                    opp_type    = "Tender Notice",
+                    source      = "Public Contracts Scotland",
+                )
+                results.append(score_opportunity(opp))
+            time.sleep(0.2)
+        except Exception as e:
+            print(f"[PCS] '{kw}': {e}")
+
+    print(f"[Public Contracts Scotland] {len(results)} opportunities")
+    return results
+
+
+# ---------------------------------------------------------------------------
+# SOURCE 3c: GOV.UK DIGITAL MARKETPLACE (G-Cloud / DOS framework)
+# Crown Commercial Service pipeline — IT/software frameworks
+# ---------------------------------------------------------------------------
+def fetch_digital_marketplace() -> list:
+    """
+    GOV.UK Digital Marketplace — buyer requirements posted under G-Cloud
+    and Digital Outcomes & Specialists frameworks. These are IT/software
+    procurements by definition — highly relevant to Peregrine.
+    Uses the Digital Marketplace API (open, no key required).
+    """
+    results  = []
+    seen_ids = set()
+    today    = datetime.utcnow()
+    from_dt  = (today - timedelta(days=30)).strftime("%Y-%m-%d")
+
+    # Digital Marketplace opportunities API
+    try:
+        r = requests.get(
+            "https://www.digitalmarketplace.service.gov.uk/api/opportunities",
+            params={
+                "status":     "live",
+                "page":       1,
+            },
+            headers={**HEADERS, "Accept": "application/json"},
+            timeout=20,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            opps = data.get("briefs", [])
+            print(f"[DigitalMarketplace] {len(opps)} live briefs")
+            for opp_data in opps[:50]:
+                brief_id  = str(opp_data.get("id", ""))
+                if brief_id in seen_ids:
+                    continue
+                title     = (opp_data.get("title") or "").strip()
+                org       = (opp_data.get("organisation") or "").strip()
+                framework = (opp_data.get("frameworkSlug") or "").strip()
+                lot       = (opp_data.get("lotSlug") or "").strip()
+                deadline  = (opp_data.get("applicationsClosedAt") or
+                             opp_data.get("clarificationQuestionsClosedAt") or "TBD")
+                published = (opp_data.get("publishedAt") or "")[:10]
+                url_      = f"https://www.digitalmarketplace.service.gov.uk/opportunities/{brief_id}"
+                summary   = (opp_data.get("summary") or
+                             opp_data.get("specialistRole") or "")[:500]
+                if not title:
+                    continue
+                seen_ids.add(brief_id)
+                opp = Opportunity(
+                    title       = title,
+                    notice_id   = f"DM-{brief_id}",
+                    buyer       = org or "UK Public Sector",
+                    posted_date = published,
+                    deadline    = deadline,
+                    description = f"{summary} Framework: {framework} / {lot}",
+                    url         = clean_url(url_),
+                    opp_type    = f"Digital Marketplace ({lot})",
+                    source      = "Digital Marketplace",
+                )
+                results.append(score_opportunity(opp))
+        else:
+            print(f"[DigitalMarketplace] HTTP {r.status_code}")
+    except Exception as e:
+        print(f"[DigitalMarketplace] Error: {e}")
+
+    # Also search closed/awarded for competitive intel
+    print(f"[Digital Marketplace] {len(results)} opportunities")
+    return results
+
+
+# ---------------------------------------------------------------------------
+# SOURCE 3d: MOD DEFENCE CONTRACTS ONLINE — defence & security analytics
+# ---------------------------------------------------------------------------
+def fetch_mod_defence_contracts() -> list:
+    """
+    MOD Defence Contracts Online — open to all suppliers.
+    Covers MoD, GCHQ, MI5/MI6 (rarely), Home Office defence-adjacent.
+    Uses the DCO search RSS feed.
+    """
+    results  = []
+    seen_ids = set()
+    today    = datetime.utcnow()
+
+    DCO_KEYWORDS = [
+        "data analytics",  "artificial intelligence",
+        "intelligence platform", "digital evidence",
+        "data integration", "machine learning",
+        "investigative", "surveillance analytics",
+    ]
+
+    for kw in DCO_KEYWORDS:
+        url = (f"https://www.contracts.mod.uk/do-find-a-tender?"
+               f"keywords={requests.utils.quote(kw)}&publishedFrom=&publishedTo=&"
+               f"closeFrom=&closeTo=&category=&buyerName=&sort=published&order=DESC")
+        try:
+            r = requests.get(url, headers={
+                "User-Agent": "Mozilla/5.0 (compatible; PeregrineUKScanner/1.0)",
+                "Accept": "text/html",
+            }, timeout=15)
+            if r.status_code != 200:
+                continue
+            # Parse basic HTML listing
+            matches = re.findall(
+                r'href="(/do-find-a-tender/contract/[^"]+)"[^>]*>([^<]{10,})</a>',
+                r.text
+            )
+            for path, title in matches[:5]:
+                title = title.strip()
+                uid   = path.split("/")[-1]
+                if uid in seen_ids or not title:
+                    continue
+                seen_ids.add(uid)
+                opp = Opportunity(
+                    title       = title,
+                    notice_id   = f"DCO-{uid}",
+                    buyer       = "Ministry of Defence",
+                    posted_date = today.strftime("%Y-%m-%d"),
+                    deadline    = "TBD",
+                    description = f"MoD defence procurement. Keyword: {kw}",
+                    url         = clean_url(f"https://www.contracts.mod.uk{path}"),
+                    opp_type    = "Defence Contract",
+                    source      = "MOD Defence Contracts Online",
+                )
+                results.append(score_opportunity(opp))
+            time.sleep(0.3)
+        except Exception as e:
+            print(f"[MOD DCO] '{kw}': {e}")
+
+    print(f"[MOD Defence Contracts] {len(results)} opportunities")
+    return results
+
+
+# ---------------------------------------------------------------------------
+# SOURCE 3e: GOV.UK GOVERNMENT GRANTS — UKRI / Home Office / MoJ grants
+# ---------------------------------------------------------------------------
+def fetch_uk_government_grants() -> list:
+    """
+    GOV.UK grants — innovation and technology funding.
+    UKRI, Innovate UK, Home Office Science, MoJ DSTL grants.
+    Uses the GOV.UK grants search RSS.
+    """
+    items    = []
+    seen     = set()
+    today    = datetime.utcnow()
+
+    grant_searches = [
+        ("Home Office Science",     "home+office+science+data+technology"),
+        ("MoJ Innovation",          "ministry+of+justice+technology+innovation"),
+        ("UKRI Policing",           "UKRI+policing+data+analytics"),
+        ("Innovate UK Safety",      "Innovate+UK+public+safety+AI"),
+        ("DSTL",                    "DSTL+data+analytics+intelligence"),
+    ]
+
+    for label, query in grant_searches:
+        url = f"https://news.google.com/rss/search?q={query}+grant+funding&hl=en-GB&gl=GB&ceid=GB:en"
+        try:
+            r = requests.get(url, headers={
+                "User-Agent": "Mozilla/5.0 (compatible; PeregrineUKScanner/1.0)",
+                "Accept": "application/rss+xml",
+            }, timeout=15)
+            if r.status_code != 200:
+                continue
+            root = ET.fromstring(r.content)
+            for item in root.findall(".//item")[:3]:
+                t_el = item.find("title")
+                l_el = item.find("link")
+                d_el = item.find("description")
+                p_el = item.find("pubDate")
+                title = (t_el.text or "").strip() if t_el is not None else ""
+                desc  = unescape(re.sub(r"<[^>]+>","", (d_el.text or ""))).strip() if d_el is not None else ""
+                url_  = (l_el.text or "").strip() if l_el is not None else ""
+                date_ = (p_el.text or "").strip() if p_el is not None else ""
+                if not title or title in seen:
+                    continue
+                combined = f"{title} {desc}".lower()
+                if not any(kw in combined for kw in ["grant","fund","invest","award","ukri","innovate"]):
+                    continue
+                seen.add(title)
+                items.append({
+                    "type":       "🇬🇧 UK Government Grant",
+                    "title":      title,
+                    "agency":     label,
+                    "summary":    desc[:300],
+                    "url":        clean_url(url_),
+                    "open_date":  date_[:10],
+                    "close_date": "",
+                    "source":     "Google News (UK)",
+                    "relevance":  label,
+                })
+            time.sleep(0.2)
+        except Exception as e:
+            print(f"[UKGrants] {label}: {e}")
+
+    print(f"[UK Government Grants] {len(items)} signals")
+    return items
+
+
+# ---------------------------------------------------------------------------
 # SOURCE 3: UK COMPETITOR INTELLIGENCE
 # UK-specific competitors + Google News UK edition
 # ---------------------------------------------------------------------------
@@ -899,10 +1176,34 @@ def _possible_fits_uk(opps: list, shown: set) -> list:
     )[:10]
 
 
+
+def build_uk_grants_section(grants: list) -> str:
+    if not grants:
+        return ""
+    rows = ""
+    for g in grants[:10]:
+        link = (f'<a href="{g["url"]}" style="color:#003078;text-decoration:none;font-weight:600;">{g["title"][:100]}</a>'
+                if g.get("url") else f'<span style="font-weight:600;">{g["title"][:100]}</span>')
+        rows += (
+            '<div style="border:1px solid #e8e8e8;border-radius:6px;padding:10px;margin-bottom:8px;background:#fff;">'
+            f'<div style="font-size:11px;font-weight:700;background:#003078;color:#fff;display:inline-block;padding:2px 8px;border-radius:10px;margin-bottom:6px;">{g["type"]}</div>'
+            f'<div style="font-size:13px;margin-bottom:4px;">{link}</div>'
+            f'<div style="font-size:11px;color:#888;">{g["agency"]} &middot; {g["source"]} &middot; {g.get("open_date","")[:10]}</div>'
+            + (f'<div style="font-size:12px;color:#555;margin-top:4px;">{g.get("summary","")[:200]}</div>' if g.get("summary") else "")
+            + '</div>'
+        )
+    return (
+        '<div style="margin:20px 0 6px">'
+        f'<h2 style="font-size:16px;color:#111;border-bottom:2px solid #eee;padding-bottom:5px;">&#x1F4B0; UK Government Grants &amp; Innovation Funding ({len(grants)})</h2>'
+        f'{rows}</div>'
+    )
+
+
 def build_html_email(opps: list, run_date: str,
                      source_counts: dict,
                      competitor_items: list,
-                     news_items: list) -> str:
+                     news_items: list,
+                     uk_grants: list = None) -> str:
 
     def _k(o): return (o.notice_id or o.title[:60].lower()).strip()
     def _dedup(lst):
@@ -963,6 +1264,7 @@ body{{font-family:'Helvetica Neue',Arial,sans-serif;background:#f5f5f5;margin:0;
   {build_opps_section("🔵 Possible Fit — Review These", _possible_fits_uk(opps, shown))}
   {build_opps_section("⚪ Low Fit — Any Keyword Match", low_list)}
   {build_competitor_section_uk(competitor_items)}
+  {build_uk_grants_section(uk_grants or [])}
   {build_news_section_uk(news_items)}
 
 </div>
@@ -1080,7 +1382,7 @@ def main():
     else:
         subject = f"Peregrine UK Scanner | {good} Good · {possible} Possible Fits | {today.strftime('%d %b')}"
 
-    html = build_html_email(ranked, run_date, source_counts, competitor_items, news_items)
+    html = build_html_email(ranked, run_date, source_counts, competitor_items, news_items, uk_grants)
     print(f"[Email] HTML size: {len(html):,} chars")
     print(f"[Email] Subject:   {subject}")
     send_email(html, subject)
