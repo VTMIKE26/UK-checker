@@ -1,152 +1,145 @@
-# 🦅 Peregrine Daily Federal Scanner
+# 🦅 Peregrine UK Daily Scanner
 
-Automated daily intelligence tool for Peregrine.io — searches federal procurement databases, agency budget signals, competitive intelligence, and grant funding every weekday morning and delivers a ranked HTML digest by email.
+Automated daily procurement intelligence tool for Peregrine.io's UK colleagues — searches UK public procurement databases every weekday morning and delivers a ranked HTML digest by email.
 
 ---
 
 ## What It Does
 
-Every weekday at 7:00 AM EST, the scanner:
+Every weekday at 7:00 AM GMT/BST, the scanner:
 
-1. Searches **10+ federal data sources** for active opportunities
-2. Scores every result against **9 capability clusters** and **249 hard exclusions**
-3. Ranks results into Strong / Good / Possible / Low Fit tiers
-4. Delivers a formatted HTML email digest with Why It Fits reasoning for every result
-5. Surfaces competitive intelligence, agency budget signals, and relevant grants
+1. Searches **UK Find a Tender** and **Contracts Finder** for active procurement notices
+2. Scores every result against **9 capability clusters** and **UK-specific hard exclusions**
+3. Ranks into Strong / Good / Possible / Low Fit tiers with **Why It Fits** reasoning
+4. Surfaces **UK competitor intelligence** (15 competitors including UK-native players)
+5. Delivers a formatted HTML email digest
 
 ---
 
 ## Scoring System
 
-Every opportunity is scored against Peregrine's 9 capability clusters. The total score determines its tier.
+Same 9 clusters as the US scanner, tuned for UK terminology:
 
-| Cluster | Points | Signal |
+| Cluster | Points | UK Signal |
 |---|---|---|
-| Data Integration & Unification | 20 | Enterprise data platforms, unified environments |
-| Investigative & Operational Analytics | 20 | Crime analytics, digital evidence, link analysis |
-| Federated & Enterprise Search | 20 | Cross-system search, query federation |
-| Entity Resolution & Record Intelligence | 20 | Deduplication, identity resolution, record linking |
-| Secure Government SaaS | 15 | FedRAMP, CJIS, GovCloud, Zero Trust |
-| Public Safety & Law Enforcement | 20 | LE platforms, NIBIN, fusion centers, RMS |
-| Corrections & Community Supervision | 20 | Probation, parole, CSOSA, offender management |
-| Platform Modernization & Replacement | 20 | Palantir replacement, legacy modernization |
-| AI & Machine Learning | 22 | AI/ML platforms, predictive analytics, LLMs |
+| Data Integration & Unification | 20 | Enterprise data platforms, data harmonisation |
+| Investigative & Operational Analytics | 20 | Crime analytics, BWV analytics, digital forensics |
+| Federated & Enterprise Search | 20 | Cross-system search, multi-source intelligence |
+| Entity Resolution & Record Intelligence | 20 | Record deduplication, identity matching |
+| Secure Government SaaS | 15 | Cyber Essentials, G-Cloud, IL2/IL3, ISO 27001 |
+| Public Safety & Law Enforcement | 20 | Police analytics, ANPR, NIM, custody management |
+| Corrections & Community Supervision | 20 | HMPPS, probation, electronic monitoring, YOT |
+| Platform Modernisation & Replacement | 20 | Legacy modernisation, digital transformation |
+| AI & Machine Learning | 22 | AI/ML platforms, predictive policing, NLP |
 
 ### Tier Thresholds
-
 | Tier | Score | Action |
 |---|---|---|
 | 🟢 Strong Fit | ≥ 40 pts | Act Now |
 | 🟡 Good Fit | ≥ 15 pts | Review Today |
 | 🔵 Possible Fit | > 0 pts | Review These |
 | ⚪ Low Fit | 0 pts | Any keyword match |
-| ⛔ Excluded | — | Hard exclusion matched |
+
+### CPV Code Intelligence
+The scanner uses EU Common Procurement Vocabulary codes (mandatory on UK tenders) to boost relevance. CPV prefixes 722–729 (IT services), 480–489 (software), and 752 (law enforcement) are treated as inherently relevant regardless of title.
 
 ### Hard Exclusions
-
-249 terms across 20 categories immediately disqualify an opportunity before scoring runs: physical facilities, military hardware, aircraft/weapons systems, network/telecom infrastructure, maintenance agreements, equipment rental, medical/pharma, staffing-only, security guard services, physical training, treatment courts, victim services, social services, research-only grants, and more.
-
----
-
-## Data Sources (10 active)
-
-### 🔵 SAM.gov API *(requires free API key)*
-Primary federal procurement database. Two-pass approach:
-- **Pass 1 — 6 ptype sweeps** (30-day window): Sources Sought (`r`), Presolicitation (`p`), Combined Synopsis (`k`), Special Notice (`s`), Solicitation (`o`), Intent to Bundle (`i`)
-- **Pass 2 — 16 title searches** (90-day window): paginated (2 pages × 100 results) for high-volume terms like "artificial intelligence" and "data analytics" to avoid the 100-result hard cap
-
-Results cached in `_SAM_RESULTS_CACHE` so DOJ/DHS/DoD can filter without additional API calls.
-
-### 🏛 DOJ — Department of Justice
-Post-filters the SAM cache by `fullParentPathName` for: Department of Justice, ATF, FBI, DEA, BOP, OJP, CSOSA, COPS Office, USMS, NSD, EOUSA. 43 capability-mapped search terms. **Zero additional API calls.**
-
-### 🛡️ DHS — Department of Homeland Security
-Post-filters the SAM cache for: CBP, ICE/HSI, USCG, CISA, FEMA, TSA, USSS, USCIS, FLETC, I&A, S&T. Same 43-term search. **Zero additional API calls.**
-
-### ⚔️ DoD — Department of Defense
-Post-filters the SAM cache for DoD agencies with enterprise data/AI needs: National Guard Bureau, DISA, DIA, DLA, Army, Navy, Air Force, Space Force, OSD. Catches programs like the NGB Enterprise Data & AI Modernization RFI. **Zero additional API calls.**
-
-### 📰 Federal Register API *(no key required)*
-Official U.S. government journal. Searches 8 targeted keyword queries for RFI/Sources Sought signal words in a 10-day window.
-
-### 💰 USASpending.gov *(no key required)*
-Competitive intelligence on recent contract awards across 6 keyword batches. Results appear in the Award Intel section, separate from opportunity tiers.
-
-### 📡 Agency RSS Feeds
-Industry news from FedScoop, Nextgov, GovTech Public Safety, GCN, Police1, Corrections1.
-
-### 🎤 Events Intelligence
-20+ curated events plus live RSS feeds. Filtered to next 3 months.
-
-### 🔎 Competitor Intelligence
-Per-competitor Google News RSS queries for all 12 tracked competitors. Targeted by name to prevent false multi-competitor attribution. Max 2 articles per competitor per day.
-
-### 💵 Federal Funding
-Targeted grants.gov + Federal Register searches using specific compound phrases. Excludes treatment courts, victim services, social services, and all non-technology programs. Includes "Why It Fits" reasoning mapped to Peregrine capabilities and customer types.
+50+ terms covering: physical facilities, construction, catering, uniforms, hardware-only procurement, military equipment, network cabling, maintenance agreements, staffing, treatment services, domestic abuse refuges, training-only contracts.
 
 ---
 
-## Email Digest Sections
+## Data Sources
 
-| Section | Content |
-|---|---|
-| 🟢 Strong Fit — Act Now | ≥ 40 pts with Why It Fits |
-| 🟡 Good Fit — Review Today | ≥ 15 pts |
-| 🔵 Possible Fit | > 0 pts |
-| ⚪ Low Fit | 0 pts, any keyword match |
-| 📊 Award Intel | Top 5 USASpending recent awards (competitive intel) |
-| 🎯 Palantir Recompetes | Palantir contracts expiring within 12 months |
-| ⚡ Other Competitor Recompetes | Axon, Tyler, Motorola, Mark43, IBM i2, ShotSpotter, Flock Safety |
-| ⚔️ Competitor News | Max 2 articles per competitor, Google News sourced |
-| 💰 Federal Funding | Direct tech grants + customer budget signals with Why It Fits |
-| 📡 Agency Budget Signals | Recent budget/spending news at DOJ, DHS, DoD sub-agencies |
-| 📰 Industry News | Market signals from govtech/LE media |
-| 🎤 Events & Conferences | Next 3 months only |
+### 🔵 Find a Tender Service (FTS)
+UK government's official above-threshold procurement portal. Uses the **OCDS release packages API** — no API key required, Open Government Licence.
 
-Subject line format: `Peregrine Daily Scanner | 3 Strong · 5 Good · 8 Possible | Apr 28`
+- **Endpoint**: `https://www.find-tender.service.gov.uk/api/1.0/ocdsReleasePackages`
+- **Filter**: `stages=tender`, 30-day window, paginated via cursor
+- **Format**: OCDS JSON — title, buyer, CPV code, deadline, value (GBP), description
+- **Coverage**: England, Wales, Northern Ireland, Scotland (above threshold)
+- **Threshold**: Generally £139,688+ incl. VAT (Procurement Act 2023)
+
+### 🔵 Contracts Finder
+Below-threshold opportunities in England. Keyword searches via OCDS API — no key required.
+
+- **Endpoint**: `https://www.contractsfinder.service.gov.uk/Published/Notice/OCDS/Search`
+- **Coverage**: England, generally £12,000–£139,688
+- **Searches**: 21 capability-matched keyword terms
+
+### 🔎 UK Competitor Intelligence
+Google News UK edition (`.../ceid=GB:en`) per competitor, 2 articles max per competitor:
+
+**US players with major UK presence:**
+Palantir UK · Axon UK · Motorola Solutions · IBM i2 · Databricks
+
+**UK-native and Europe-based competitors:**
+Civica · NEC UK · Hexagon · NICE Systems · Capita · Sopra Steria · CGI UK · Vigil AI · Forensic Analytics · i-nexus
+
+### 📰 UK Industry News
+PublicTechnology · PoliceOracle · GOV.UK (policing + CJ tech feeds) · LGC · Computer Weekly · UKAuthority · StateScoop · DefenseScoop
 
 ---
 
-## Competitors Monitored (12)
+## UK Procurement Context
 
-Palantir · Axon · ShotSpotter · Mark43 · Tyler Technologies · Motorola Solutions · IBM i2 · Esri · Databricks · Appriss · SuperCom · Flock Safety
+**Procurement Act 2023** (in force 24 February 2025) governs new procurements in England, Wales, and Northern Ireland. Scotland uses the Public Contracts (Scotland) Regulations 2015.
 
-USASpending recompete tracking: Palantir, Axon, Tyler Technologies, Motorola Solutions, Mark43, IBM i2, ShotSpotter, Flock Safety
+**Key UK buyer agencies for Peregrine:**
+- Home Office (policing strategy, immigration enforcement)
+- National Police Chiefs' Council (NPCC)
+- 43 territorial police forces in England & Wales
+- Police Scotland
+- Police Service of Northern Ireland (PSNI)
+- Ministry of Justice / His Majesty's Prison and Probation Service (HMPPS)
+- National Probation Service
+- Crown Prosecution Service (CPS)
+- National Crime Agency (NCA)
+- Serious Fraud Office (SFO)
+- UK Border Force / Immigration Enforcement
+- HM Revenue & Customs (HMRC) — Fraud Investigation Service
+- Crown Commercial Service (CCS) — framework agreements
+
+**Key procurement frameworks (Peregrine-relevant):**
+- **G-Cloud 14** — cloud software and services, CDPS marketplace
+- **RM6261 (Technology Products & Services)** — Crown Commercial Service
+- **DOS6 (Digital Outcomes and Specialists)** — CDPS
+- **RM6068 (Data & Application Solutions)**
 
 ---
 
 ## Setup
 
-### Step 1 — SAM.gov API key (free)
-1. Sign in at [sam.gov](https://sam.gov)
-2. Go to **Profile → API Keys → Generate Key**
+### Step 1 — GitHub Secrets
 
-### Step 2 — SendGrid API key (free tier, 100 emails/day)
-1. Sign up at [sendgrid.com](https://sendgrid.com)
-2. **Settings → API Keys → Create API Key** → Restricted → Mail Send only
-
-### Step 3 — GitHub Secrets
-Go to **Settings → Secrets and variables → Actions**:
+Add these to **Settings → Secrets and variables → Actions**:
 
 | Secret | Value |
 |---|---|
-| `SAM_API_KEY` | Your SAM.gov API key |
-| `SENDGRID_API_KEY` | Your SendGrid API key |
+| `SENDGRID_API_KEY` | Your SendGrid API key (same as US scanner) |
+| `UK_EMAIL_TO` | UK team email address |
+| `EMAIL_FROM` | Sender email address |
 
-### Step 4 — Reliable scheduling via cron-job.org
+> No SAM.gov key needed — Find a Tender and Contracts Finder are both open APIs.
 
-GitHub Actions cron is unreliable (30–90 min delays common). Use [cron-job.org](https://cron-job.org) (free) as the primary trigger:
+### Step 2 — Reliable scheduling via cron-job.org
+
+GitHub Actions cron is unreliable. Use [cron-job.org](https://cron-job.org) (free):
 
 **cron-job.org settings:**
-- **URL**: `https://api.github.com/repos/VTMIKE26/daily-Opps-Check/actions/workflows/daily_scan.yml/dispatches`
+- **URL**: `https://api.github.com/repos/YOUR_ORG/YOUR_REPO/actions/workflows/uk_daily_scan.yml/dispatches`
 - **Method**: POST
-- **Headers**: `Authorization: token YOUR_GITHUB_PAT` · `Accept: application/vnd.github+json` · `Content-Type: application/json`
+- **Headers**: `Authorization: token YOUR_PAT` · `Accept: application/vnd.github+json` · `Content-Type: application/json`
 - **Body**: `{"ref":"main"}`
-- **Schedule**: `0 12 * * 1-5` (7am EST) AND `0 11 * * 1-5` (7am EDT)
+- **Schedule (GMT, Nov–Mar)**: `0 7 * * 1-5`
+- **Schedule (BST, Mar–Oct)**: `0 6 * * 1-5`
 
-Generate a GitHub PAT at [github.com/settings/tokens](https://github.com/settings/tokens) with `repo` + `workflow` scopes. A successful test run returns HTTP **204**.
+Create both — BST is UTC+1 so the summer cron is `0 6` and winter is `0 7`.
 
-The GitHub native cron at `20 12 * * 1-5` (7:20 AM) stays as a backup. The concurrency group `peregrine-daily-scanner` prevents duplicate emails if both fire.
+Generate a GitHub PAT at [github.com/settings/tokens](https://github.com/settings/tokens) with `repo` + `workflow` scopes. A successful test returns HTTP **204**.
+
+### Step 3 — Keep workflows alive
+
+`keep_alive.yml` commits a timestamp every weekday at 7:00 AM GMT, preventing GitHub disabling scheduled workflows after 60 days of inactivity.
 
 ---
 
@@ -155,39 +148,54 @@ The GitHub native cron at `20 12 * * 1-5` (7:20 AM) stays as a backup. The concu
 ```bash
 pip install requests
 
-export SAM_API_KEY="your_key_here"
 export SENDGRID_API_KEY="your_sendgrid_key"
-export EMAIL_TO="mike.kelly@peregrine.io"
-export EMAIL_FROM="mikefkelly26@gmail.com"
+export EMAIL_TO="your-uk-team@peregrine.io"
+export EMAIL_FROM="scanner@peregrine.io"
 
-python daily_scan.py
+python uk_daily_scan.py
 ```
 
-Output: `digest_YYYYMMDD.html` saved locally. Expected runtime: ~2 minutes.
+Output: `uk_digest_YYYYMMDD.html` saved locally. Open in browser to preview.
 
----
-
-## API Rate Limits
-
-| API | Daily Limit | Our Usage |
-|---|---|---|
-| SAM.gov | 1,000 calls/day | ~390 calls |
-| Federal Register | Unlimited | ~8 calls |
-| USASpending.gov | Unlimited | ~6 calls |
-| grants.gov | Unlimited | ~35 calls |
-| Google News RSS | Unlimited | ~30 feeds |
-| SendGrid (free) | 100 emails/day | 1 email |
+**Expected runtime:** ~2–3 minutes (no API rate limits on FTS or Contracts Finder).
 
 ---
 
 ## File Structure
 
 ```
-daily-Opps-Check/
-├── daily_scan.py               # Main script — all sources, scoring, email
+peregrine-uk-scanner/
+├── uk_daily_scan.py            # Main script
 ├── .github/
 │   └── workflows/
-│       ├── daily_scan.yml      # Primary workflow (dispatch + 7:20am backup cron)
-│       └── keep_alive.yml      # Commits timestamp to prevent 60-day inactivity suspension
+│       ├── uk_daily_scan.yml   # Primary workflow (dispatch + 7:20am backup)
+│       └── keep_alive.yml      # Prevents 60-day inactivity suspension
 └── README.md
 ```
+
+---
+
+## API Limits
+
+| API | Rate Limit | Our Usage |
+|---|---|---|
+| Find a Tender OCDS | 429 with Retry-After header | ~5–10 paginated calls |
+| Contracts Finder | None documented | ~21 keyword calls |
+| Google News RSS | Informal | ~30 feeds |
+| SendGrid (free) | 100 emails/day | 1 email |
+
+---
+
+## Differences from US Scanner
+
+| Feature | US Scanner | UK Scanner |
+|---|---|---|
+| Primary source | SAM.gov (API key required) | Find a Tender (no key) |
+| Secondary source | Contracts Finder (US) | Contracts Finder (UK) |
+| Agency filters | DOJ, DHS, DoD | Not required — all UK buyers |
+| Scoring terminology | Modernization, FedRAMP, CJIS | Modernisation, G-Cloud, Cyber Essentials |
+| Competitors | 12 (US-focused) | 15 (includes Civica, NEC, Hexagon, Capita, CGI) |
+| Date format | MM/DD/YYYY | DD Month YYYY (UK standard) |
+| Currency | USD | GBP |
+| Time zone | EST/EDT | GMT/BST |
+| Procurement law | FAR / SAM.gov | Procurement Act 2023 / OJEU/FTS |
