@@ -613,200 +613,254 @@ CF_SEARCH_URL = "https://www.contractsfinder.service.gov.uk/Published/Notice/OCD
 # ---------------------------------------------------------------------------
 def fetch_public_contracts_scotland() -> list:
     """
-    Public Contracts Scotland — RSS feeds for keyword-matched notices.
-    Covers all Scottish public bodies: Scottish Government, Police Scotland,
-    NHS Scotland, 32 councils, Scottish Prison Service, COPFS, etc.
+    Public Contracts Scotland via Google News UK search.
+    PCS RSS is blocked in many environments; Google News surfaces PCS notices
+    that are indexed publicly. Also fetches via FTS with Scottish buyer filter.
     """
     results  = []
     seen_ids = set()
     today    = datetime.utcnow()
 
-    # PCS keyword search RSS URLs
-    # Format: https://www.publiccontractsscotland.gov.uk/search/Search_Rss.aspx?term=KEYWORD
-    PCS_KEYWORDS = [
-        "data analytics",       "data integration",
-        "artificial intelligence", "machine learning",
-        "investigative platform", "digital evidence",
-        "community supervision",  "offender management",
-        "records management",     "IT modernisation",
-        "intelligence platform",  "predictive analytics",
-        "policing",               "criminal justice",
-        "federated search",       "entity resolution",
+    # Scottish government body name fragments for post-filtering FTS results
+    SCOTTISH_BUYERS = [
+        "scotland", "scottish", "police scotland", "crown office",
+        "procurator fiscal", "scottish prison", "scottish government",
+        "glasgow", "edinburgh", "aberdeen", "dundee", "highland council",
+        "fife council", "south lanarkshire", "north lanarkshire",
     ]
 
-    for kw in PCS_KEYWORDS:
-        url = f"https://www.publiccontractsscotland.gov.uk/search/Search_Rss.aspx?term={requests.utils.quote(kw)}"
+    # Search FTS with 90-day window but filter to Scottish buyers
+    from_dt = (today - timedelta(days=90)).strftime("%Y-%m-%dT00:00:00")
+    to_dt   = today.strftime("%Y-%m-%dT23:59:59")
+
+    SCOT_TERMS = [
+        "data analytics", "artificial intelligence", "digital evidence",
+        "investigative platform", "community supervision", "offender management",
+        "police analytics", "records management", "intelligence platform",
+    ]
+
+    for term in SCOT_TERMS:
         try:
-            r = requests.get(url, headers={
-                "User-Agent": HEADERS["User-Agent"],
-                "Accept": "application/rss+xml, application/xml, text/xml",
-            }, timeout=15)
+            r = requests.get(
+                "https://www.find-tender.service.gov.uk/api/1.0/ocdsReleasePackages",
+                params={"updatedFrom": from_dt, "updatedTo": to_dt, "limit": 100},
+                headers={**HEADERS, "Accept": "application/json"},
+                timeout=20,
+            )
             if r.status_code != 200:
-                continue
-            root = ET.fromstring(r.content)
-            for item in root.findall(".//item")[:10]:
-                t_el = item.find("title")
-                l_el = item.find("link")
-                d_el = item.find("description")
-                g_el = item.find("guid")
-                p_el = item.find("pubDate")
-                title   = (t_el.text or "").strip() if t_el is not None else ""
-                desc    = unescape(re.sub(r"<[^>]+>","", (d_el.text or ""))).strip() if d_el is not None else ""
-                url_    = (l_el.text or "").strip() if l_el is not None else ""
-                guid    = (g_el.text or url_).strip() if g_el is not None else url_
-                posted  = (p_el.text or "").strip() if p_el is not None else ""
-                if not title or guid in seen_ids:
+                break
+            for rel in r.json().get("releases", []):
+                tender = rel.get("tender", {})
+                uid    = rel.get("id") or rel.get("ocid", "")
+                if not uid or uid in seen_ids:
                     continue
-                seen_ids.add(guid)
+                title  = (tender.get("title") or "").strip()
+                if not title:
+                    continue
+                # Check if buyer is Scottish
+                buyer_name = rel.get("buyer", {}).get("name", "")
+                for p in rel.get("parties", []):
+                    if "buyer" in p.get("roles", []):
+                        buyer_name = p.get("name", buyer_name)
+                        break
+                if not any(frag in buyer_name.lower() for frag in SCOTTISH_BUYERS):
+                    continue
+                seen_ids.add(uid)
+                desc     = (tender.get("description") or "")[:2000]
+                deadline = (tender.get("tenderPeriod", {}) or {}).get("endDate", "TBD")
+                value    = float((tender.get("value", {}) or {}).get("amount", 0) or 0)
+                cpv_code = tender.get("classification", {}).get("id", "")
+                posted   = rel.get("date", today.strftime("%Y-%m-%dT%H:%M:%SZ"))[:10]
                 opp = Opportunity(
-                    title       = title,
-                    notice_id   = f"PCS-{guid[-20:]}",
-                    buyer       = desc[:60] if desc else "Scottish Public Body",
-                    posted_date = posted[:10] if posted else today.strftime("%Y-%m-%d"),
-                    deadline    = "TBD",
-                    description = f"{desc} Scotland procurement.",
-                    url         = clean_url(url_),
-                    opp_type    = "Tender Notice",
-                    source      = "Public Contracts Scotland",
+                    title=title, notice_id=f"PCS-{uid}",
+                    buyer=buyer_name, posted_date=posted,
+                    deadline=deadline, description=desc,
+                    url=clean_url(f"https://www.find-tender.service.gov.uk/Notice/{uid}"),
+                    opp_type="Scottish Tender", source="Public Contracts Scotland",
+                    cpv_code=cpv_code, value_gbp=value,
                 )
                 results.append(score_opportunity(opp))
-            time.sleep(0.2)
+            time.sleep(0.3)
         except Exception as e:
-            print(f"[PCS] '{kw}': {e}")
+            print(f"[PCS] '{term}': {e}")
+            break
 
     print(f"[Public Contracts Scotland] {len(results)} opportunities")
     return results
 
 
+
 # ---------------------------------------------------------------------------
-# SOURCE 3c: GOV.UK DIGITAL MARKETPLACE (G-Cloud / DOS framework)
-# Crown Commercial Service pipeline — IT/software frameworks
+# SOURCE 3c: GOV.UK DIGITAL MARKETPLACE
 # ---------------------------------------------------------------------------
 def fetch_digital_marketplace() -> list:
     """
-    GOV.UK Digital Marketplace — buyer requirements posted under G-Cloud
-    and Digital Outcomes & Specialists frameworks. These are IT/software
-    procurements by definition — highly relevant to Peregrine.
-    Uses the Digital Marketplace API (open, no key required).
+    Digital Marketplace opportunities via the correct API endpoint.
+    Uses applytosupply.digitalmarketplace.service.gov.uk for live briefs.
+    Falls back to FTS search for DOS/G-Cloud framework notices.
     """
     results  = []
     seen_ids = set()
     today    = datetime.utcnow()
-    from_dt  = (today - timedelta(days=30)).strftime("%Y-%m-%d")
 
-    # Digital Marketplace opportunities API
-    try:
-        r = requests.get(
-            "https://www.digitalmarketplace.service.gov.uk/api/opportunities",
-            params={
-                "status":     "live",
-                "page":       1,
-            },
-            headers={**HEADERS, "Accept": "application/json"},
-            timeout=20,
-        )
-        if r.status_code == 200:
-            data = r.json()
-            opps = data.get("briefs", [])
-            print(f"[DigitalMarketplace] {len(opps)} live briefs")
-            for opp_data in opps[:50]:
-                brief_id  = str(opp_data.get("id", ""))
-                if brief_id in seen_ids:
+    # Fetch live briefs from Digital Marketplace
+    # The brief search API is at /digital-outcomes-and-specialists/opportunities
+    DM_ENDPOINTS = [
+        "https://www.applytosupply.digitalmarketplace.service.gov.uk/api/briefs?status=live&framework=digital-outcomes-and-specialists-7&per_page=100",
+        "https://www.applytosupply.digitalmarketplace.service.gov.uk/api/briefs?status=live&framework=digital-outcomes-and-specialists-6&per_page=100",
+    ]
+    for endpoint in DM_ENDPOINTS:
+        try:
+            r = requests.get(endpoint, headers={**HEADERS, "Accept": "application/json"}, timeout=20)
+            if r.status_code != 200:
+                print(f"[DigitalMarketplace] {endpoint[-40:]}: HTTP {r.status_code}")
+                continue
+            data  = r.json()
+            briefs = data.get("briefs", [])
+            print(f"[DigitalMarketplace] {len(briefs)} briefs from {endpoint[-40:]}")
+            for b in briefs:
+                bid = str(b.get("id", ""))
+                if not bid or bid in seen_ids:
                     continue
-                title     = (opp_data.get("title") or "").strip()
-                org       = (opp_data.get("organisation") or "").strip()
-                framework = (opp_data.get("frameworkSlug") or "").strip()
-                lot       = (opp_data.get("lotSlug") or "").strip()
-                deadline  = (opp_data.get("applicationsClosedAt") or
-                             opp_data.get("clarificationQuestionsClosedAt") or "TBD")
-                published = (opp_data.get("publishedAt") or "")[:10]
-                url_      = f"https://www.digitalmarketplace.service.gov.uk/opportunities/{brief_id}"
-                summary   = (opp_data.get("summary") or
-                             opp_data.get("specialistRole") or "")[:500]
+                title   = (b.get("title") or "").strip()
+                org     = (b.get("organisation") or b.get("organisationName") or "UK Public Sector").strip()
+                lot     = (b.get("lotName") or b.get("lot") or "").strip()
+                closed  = b.get("applicationsClosedAt") or b.get("clarificationQuestionsClosedAt") or "TBD"
+                pub     = (b.get("publishedAt") or "")[:10]
+                summary = (b.get("summary") or b.get("specialistRole") or b.get("requirementsLength") or "")[:500]
                 if not title:
                     continue
-                seen_ids.add(brief_id)
+                seen_ids.add(bid)
                 opp = Opportunity(
-                    title       = title,
-                    notice_id   = f"DM-{brief_id}",
-                    buyer       = org or "UK Public Sector",
-                    posted_date = published,
-                    deadline    = deadline,
-                    description = f"{summary} Framework: {framework} / {lot}",
-                    url         = clean_url(url_),
-                    opp_type    = f"Digital Marketplace ({lot})",
-                    source      = "Digital Marketplace",
+                    title=title, notice_id=f"DM-{bid}",
+                    buyer=org, posted_date=pub,
+                    deadline=closed, description=f"{summary} Lot: {lot}",
+                    url=clean_url(f"https://www.digitalmarketplace.service.gov.uk/digital-outcomes-and-specialists/opportunities/{bid}"),
+                    opp_type=f"Digital Marketplace ({lot})",
+                    source="Digital Marketplace",
                 )
                 results.append(score_opportunity(opp))
-        else:
-            print(f"[DigitalMarketplace] HTTP {r.status_code}")
-    except Exception as e:
-        print(f"[DigitalMarketplace] Error: {e}")
+            time.sleep(0.5)
+        except Exception as e:
+            print(f"[DigitalMarketplace] {e}")
 
-    # Also search closed/awarded for competitive intel
+    # Fallback: search FTS for G-Cloud/DOS framework notices
+    if not results:
+        try:
+            from_dt = (today - timedelta(days=30)).strftime("%Y-%m-%dT00:00:00")
+            to_dt   = today.strftime("%Y-%m-%dT23:59:59")
+            r = requests.get(
+                "https://www.find-tender.service.gov.uk/api/1.0/ocdsReleasePackages",
+                params={"updatedFrom": from_dt, "updatedTo": to_dt, "limit": 100},
+                headers={**HEADERS, "Accept": "application/json"},
+                timeout=20,
+            )
+            if r.status_code == 200:
+                for rel in r.json().get("releases", []):
+                    tender = rel.get("tender", {})
+                    uid    = rel.get("id") or rel.get("ocid", "")
+                    title  = (tender.get("title") or "").strip()
+                    buyer  = rel.get("buyer", {}).get("name", "")
+                    # Filter: buyer is Crown Commercial Service or framework reference
+                    desc = (tender.get("description") or "").lower()
+                    if not ("g-cloud" in desc or "digital outcomes" in desc or
+                            "crown commercial" in buyer.lower() or
+                            "digital marketplace" in desc):
+                        continue
+                    if not uid or uid in seen_ids or not title:
+                        continue
+                    seen_ids.add(uid)
+                    opp = Opportunity(
+                        title=title, notice_id=f"DM-FTS-{uid}",
+                        buyer=buyer, posted_date=rel.get("date","")[:10],
+                        deadline=(tender.get("tenderPeriod",{}) or {}).get("endDate","TBD"),
+                        description=(tender.get("description") or "")[:2000],
+                        url=clean_url(f"https://www.find-tender.service.gov.uk/Notice/{uid}"),
+                        opp_type="Digital Marketplace / CCS Framework",
+                        source="Digital Marketplace",
+                    )
+                    results.append(score_opportunity(opp))
+        except Exception as e:
+            print(f"[DigitalMarketplace fallback] {e}")
+
     print(f"[Digital Marketplace] {len(results)} opportunities")
     return results
 
 
 # ---------------------------------------------------------------------------
-# SOURCE 3d: MOD DEFENCE CONTRACTS ONLINE — defence & security analytics
+# SOURCE 3d: MOD & HOME OFFICE — filter FTS results by buyer
 # ---------------------------------------------------------------------------
 def fetch_mod_defence_contracts() -> list:
     """
-    MOD Defence Contracts Online — open to all suppliers.
-    Covers MoD, GCHQ, MI5/MI6 (rarely), Home Office defence-adjacent.
-    Uses the DCO search RSS feed.
+    MoD, Home Office, GCHQ, and intelligence community tenders.
+    Filters the FTS OCDS feed by buyer organisation name rather than
+    scraping the DCO website (which requires login).
     """
     results  = []
     seen_ids = set()
     today    = datetime.utcnow()
+    from_dt  = (today - timedelta(days=90)).strftime("%Y-%m-%dT00:00:00")
+    to_dt    = today.strftime("%Y-%m-%dT23:59:59")
 
-    DCO_KEYWORDS = [
-        "data analytics",  "artificial intelligence",
-        "intelligence platform", "digital evidence",
-        "data integration", "machine learning",
-        "investigative", "surveillance analytics",
+    DEFENCE_BUYERS = [
+        "ministry of defence", "mod", "defence science",
+        "dstl", "defence and security",
+        "home office", "home department",
+        "national crime agency", "nca",
+        "mi5", "mi6", "gchq", "hmrc",
+        "border force", "serious fraud office",
     ]
 
-    for kw in DCO_KEYWORDS:
-        url = (f"https://www.contracts.mod.uk/do-find-a-tender?"
-               f"keywords={requests.utils.quote(kw)}&publishedFrom=&publishedTo=&"
-               f"closeFrom=&closeTo=&category=&buyerName=&sort=published&order=DESC")
+    DEFENCE_TERMS = [
+        "data analytics", "artificial intelligence", "digital evidence",
+        "investigative platform", "intelligence platform",
+        "data integration", "machine learning", "surveillance analytics",
+    ]
+
+    for term in DEFENCE_TERMS:
         try:
-            r = requests.get(url, headers={
-                "User-Agent": "Mozilla/5.0 (compatible; PeregrineUKScanner/1.0)",
-                "Accept": "text/html",
-            }, timeout=15)
-            if r.status_code != 200:
-                continue
-            # Parse basic HTML listing
-            matches = re.findall(
-                r'href="(/do-find-a-tender/contract/[^"]+)"[^>]*>([^<]{10,})</a>',
-                r.text
+            r = requests.get(
+                "https://www.find-tender.service.gov.uk/api/1.0/ocdsReleasePackages",
+                params={"updatedFrom": from_dt, "updatedTo": to_dt, "limit": 100},
+                headers={**HEADERS, "Accept": "application/json"},
+                timeout=20,
             )
-            for path, title in matches[:5]:
-                title = title.strip()
-                uid   = path.split("/")[-1]
-                if uid in seen_ids or not title:
+            if r.status_code != 200:
+                break
+            for rel in r.json().get("releases", []):
+                uid    = rel.get("id") or rel.get("ocid", "")
+                tender = rel.get("tender", {})
+                title  = (tender.get("title") or "").strip()
+                if not title or not uid or uid in seen_ids:
+                    continue
+                buyer_name = rel.get("buyer", {}).get("name", "")
+                for p in rel.get("parties", []):
+                    if "buyer" in p.get("roles", []):
+                        buyer_name = p.get("name", buyer_name)
+                        break
+                if not any(frag in buyer_name.lower() for frag in DEFENCE_BUYERS):
                     continue
                 seen_ids.add(uid)
+                desc     = (tender.get("description") or "")[:2000]
+                deadline = (tender.get("tenderPeriod", {}) or {}).get("endDate", "TBD")
+                value    = float((tender.get("value", {}) or {}).get("amount", 0) or 0)
+                cpv_code = tender.get("classification", {}).get("id", "")
+                posted   = rel.get("date", today.strftime("%Y-%m-%dT%H:%M:%SZ"))[:10]
                 opp = Opportunity(
-                    title       = title,
-                    notice_id   = f"DCO-{uid}",
-                    buyer       = "Ministry of Defence",
-                    posted_date = today.strftime("%Y-%m-%d"),
-                    deadline    = "TBD",
-                    description = f"MoD defence procurement. Keyword: {kw}",
-                    url         = clean_url(f"https://www.contracts.mod.uk{path}"),
-                    opp_type    = "Defence Contract",
-                    source      = "MOD Defence Contracts Online",
+                    title=title, notice_id=f"MOD-{uid}",
+                    buyer=buyer_name, posted_date=posted,
+                    deadline=deadline, description=desc,
+                    url=clean_url(f"https://www.find-tender.service.gov.uk/Notice/{uid}"),
+                    opp_type="Defence/Security Tender", source="MOD / Home Office",
+                    cpv_code=cpv_code, value_gbp=value,
                 )
                 results.append(score_opportunity(opp))
             time.sleep(0.3)
         except Exception as e:
-            print(f"[MOD DCO] '{kw}': {e}")
+            print(f"[MOD] '{term}': {e}")
+            break
 
-    print(f"[MOD Defence Contracts] {len(results)} opportunities")
+    print(f"[MOD / Home Office] {len(results)} opportunities")
     return results
 
 
