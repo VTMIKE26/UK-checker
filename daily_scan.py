@@ -87,37 +87,57 @@ CPV_LABELS = {
 # We post-score by buyer type — these are Peregrine's actual customer types
 # Matching any of these in the buyer name adds a relevance boost
 
+# Tier 1: Direct Peregrine customers — policing, justice, corrections
 TIER1_BUYERS = [
-    # Police forces
-    "police", "constabulary", "met police", "metropolitan police",
+    # Metropolitan / national police
+    "metropolitan police", "met police", "scotland yard",
     "city of london police", "british transport police",
-    # Justice / corrections
-    "ministry of justice", "hm prison", "hmpps", "national probation",
-    "hmps", "youth offending", "youth justice board",
-    # National agencies
-    "national crime agency", "nca", "serious fraud office",
+    "national police chiefs", "npcc",
+    "police digital service",
+    # All 43 territorial forces — match on "police" + "constabulary"
+    "police", "constabulary",
+    # Justice / corrections — HMPPS is massive modernisation buyer
+    "ministry of justice", "moj", "justice digital",
+    "hm prison", "hmpps", "hmps", "his majesty's prison",
+    "national probation", "probation service",
+    "youth offending", "youth justice board",
+    # National crime / intelligence
+    "national crime agency", "nca",
+    "serious organised crime", "soca",
+    "serious fraud office", "sfo",
     "crown prosecution service", "cps",
-    "home office", "home department",
-    "uk border force", "immigration enforcement",
-    # Intelligence
+    # Home Office agencies
+    "home office",
+    "uk border force", "border force",
+    "immigration enforcement",
     "national counter terrorism", "nctp",
-    "joint terrorism analysis",
+    # Courts / CJS
+    "hmcts", "her majesty's courts", "his majesty's courts",
+    "crown court", "magistrates court",
+    "judicial office",
+    # Devolved policing
+    "police scotland", "scottish police",
+    "police service of northern ireland", "psni",
+    "dyfed-powys", "south wales police", "gwent police",
+    # Other LE-adjacent
+    "national highways",
+    "environment agency enforcement",
 ]
 
+# Tier 2: Government agencies with data/analytics needs Peregrine can serve
 TIER2_BUYERS = [
-    # Central government with data/analytics needs
-    "cabinet office", "hmrc", "dwp", "department for work",
+    "cabinet office", "government digital service", "gds",
+    "crown commercial service", "ccs",
+    "hmrc", "revenue and customs",
+    "dwp", "department for work",
     "ministry of defence", "mod", "dstl",
-    "department of health", "nhsx", "nhs digital", "nhs england",
-    # Devolved policing/justice
-    "police scotland", "scottish prison service", "crown office",
-    "procurator fiscal", "northern ireland courts",
-    "psni", "police service of northern ireland",
-    # Local government (LE adjacent)
-    "probation", "youth offending team", "safeguarding",
-    # CCS / frameworks
-    "crown commercial service", "government digital service", "gds",
-    "central digital",
+    "home department",
+    "nhs digital", "nhsx", "nhs england",
+    "scottish prison service", "sps",
+    "crown office", "procurator fiscal", "copfs",
+    "northern ireland courts",
+    "safeguarding", "marac", "mash",
+    "central digital", "government data",
 ]
 
 # ---------------------------------------------------------------------------
