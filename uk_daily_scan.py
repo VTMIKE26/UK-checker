@@ -192,7 +192,8 @@ CAPABILITY_CLUSTERS = [
     ("Corrections & Community Supervision", 20, [
         "community supervision", "probation", "parole",
         "offender management", "prison management", "prisoner management",
-        "case management system", "rehabilitation technology",
+        "case management system", "case management analytics",
+        "case management platform", "rehabilitation technology",
         "hmpps", "hmps", "noms", "her majesty's prison",
         "youth offending", "youth justice",
         "electronic monitoring", "electronic tagging",
@@ -240,7 +241,8 @@ HARD_EXCLUSIONS = [
     "office furniture", "catering services", "food supply",
     "medical supplies", "pharmaceutical", "laundry services",
     "body armour", "taser", "firearms", "ammunition",
-    "vehicle purchase", "fleet management",
+    "vehicle purchase", "vehicle fleet", "fleet procurement",
+    "fleet management", "fleet contract",
     "radio equipment", "handheld devices procurement",
     # Construction
     "construction works", "refurbishment works", "building works",
