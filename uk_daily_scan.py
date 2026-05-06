@@ -331,13 +331,13 @@ def score_opportunity(opp: Opportunity) -> Opportunity:
             total += pts
             reasons.append(f"✓ {cluster_name}: matched '{matched}'")
 
-    # Buyer type bonus — Tier 1 buyers get a lift to surface them higher
+    # Buyer type bonus — Tier 1 buyers get a lift regardless of base score
     buyer_type = _classify_buyer(opp.buyer)
     opp.buyer_type = buyer_type
-    if buyer_type == "tier1" and total > 0:
+    if buyer_type == "tier1":
         total += 10
-        reasons.append("✓ Priority buyer: Tier 1 law enforcement / justice agency")
-    elif buyer_type == "tier2" and total > 0:
+        reasons.append("✓ Priority buyer: law enforcement / justice / policing")
+    elif buyer_type == "tier2":
         total += 5
         reasons.append("✓ Relevant buyer: government / public safety adjacent")
 
@@ -412,20 +412,24 @@ def _extract_fts_opp(rel: dict, source_label: str = "Find a Tender") -> Optional
 # ---------------------------------------------------------------------------
 FTS_API = "https://www.find-tender.service.gov.uk/api/1.0/ocdsReleasePackages"
 
-def fetch_fts_by_cpv(days_back: int = 60) -> list:
+def fetch_fts_by_cpv(days_back: int = 90) -> list:
     """
     Fetch FTS tenders filtered by relevant CPV code prefixes.
-    This is the most precise method — every IT/software/LE tender
-    must declare a CPV code so nothing relevant is missed.
+    Paginates fully through all tenders in the window.
+    FTS returns ~500-2000 tenders/day across all categories.
+    We keep only IT/software/LE CPV codes (722-729, 480-489, 752).
     """
     results, seen = [], set()
     today   = datetime.utcnow()
     from_dt = (today - timedelta(days=days_back)).strftime("%Y-%m-%dT00:00:00")
     to_dt   = today.strftime("%Y-%m-%dT23:59:59")
 
-    cursor = None
-    pages  = 0
-    while pages < 20:  # max 2000 tenders per run
+    cursor     = None
+    pages      = 0
+    total_seen = 0
+    max_pages  = 50  # up to 5000 tenders
+
+    while pages < max_pages:
         params = {"updatedFrom": from_dt, "updatedTo": to_dt, "limit": 100}
         if cursor:
             params["cursor"] = cursor
@@ -433,42 +437,44 @@ def fetch_fts_by_cpv(days_back: int = 60) -> list:
             r = requests.get(FTS_API, params=params,
                              headers={**HEADERS, "Accept": "application/json"}, timeout=30)
             if r.status_code == 429:
-                time.sleep(int(r.headers.get("Retry-After", 30)))
+                wait = int(r.headers.get("Retry-After", 30))
+                print(f"[FTS/CPV] Rate limited — waiting {wait}s")
+                time.sleep(wait)
                 continue
             if r.status_code != 200:
-                print(f"[FTS/CPV] HTTP {r.status_code}")
+                print(f"[FTS/CPV] HTTP {r.status_code} on page {pages+1}")
                 break
             data     = r.json()
             releases = data.get("releases", [])
             if not releases:
                 break
+            total_seen += len(releases)
             for rel in releases:
                 opp = _extract_fts_opp(rel, "Find a Tender")
                 if not opp or opp.notice_id in seen:
                     continue
                 cpv_prefix = opp.cpv_code[:3] if opp.cpv_code else ""
-                # Keep if CPV is always relevant, or if CPV is conditional
-                if cpv_prefix not in ALWAYS_RELEVANT_CPV_PREFIXES and \
-                   cpv_prefix not in CONDITIONAL_CPV_PREFIXES:
+                # ONLY keep IT/software/LE CPV codes
+                if (cpv_prefix not in ALWAYS_RELEVANT_CPV_PREFIXES and
+                        cpv_prefix not in CONDITIONAL_CPV_PREFIXES):
                     continue
                 seen.add(opp.notice_id)
                 results.append(score_opportunity(opp))
             cursor = data.get("cursor")
+            pages += 1
             if not cursor or len(releases) < 100:
                 break
-            pages += 1
-            time.sleep(0.4)
+            time.sleep(0.3)
         except Exception as e:
-            print(f"[FTS/CPV] {e}")
+            print(f"[FTS/CPV] page {pages}: {e}")
             break
 
-    # Filter: keep scored > 0 OR CPV always-relevant even if score is 0
+    # Keep scored > 0 OR always-relevant CPV (even if scored 0, shows in Low Fit)
     relevant = [o for o in results
-                if o.score > 0 or o.cpv_code[:3] in ALWAYS_RELEVANT_CPV_PREFIXES]
-    # But exclude ⛔ Not a Fit
-    relevant = [o for o in relevant if o.tier != "⛔ Not a Fit"]
+                if o.tier != "⛔ Not a Fit"
+                and (o.score > 0 or o.cpv_code[:3] in ALWAYS_RELEVANT_CPV_PREFIXES)]
 
-    print(f"[FTS/CPV] {len(results)} CPV-matched → {len(relevant)} scored relevant")
+    print(f"[FTS/CPV] {total_seen} total tenders scanned → {len(results)} CPV-matched → {len(relevant)} relevant")
     return relevant
 
 
@@ -477,52 +483,63 @@ def fetch_fts_by_cpv(days_back: int = 60) -> list:
 # ---------------------------------------------------------------------------
 def fetch_fts_by_keyword(days_back: int = 90) -> list:
     """
-    FTS keyword title searches for Peregrine-specific terms.
-    Complements CPV search for tenders that might use generic CPV codes.
+    FTS keyword searches via the web search endpoint.
+    Uses /Search?keyword=TERM which is the same as the FTS website search.
+    Returns OCDS releases for matching notices.
+    Also tries the OCDS API with keyword param as fallback.
     """
     results, seen = [], set()
     today   = datetime.utcnow()
     from_dt = (today - timedelta(days=days_back)).strftime("%Y-%m-%dT00:00:00")
     to_dt   = today.strftime("%Y-%m-%dT23:59:59")
 
-    # Specific compound terms that strongly signal Peregrine fit
+    # Highly specific Peregrine terms — each should return <50 results
     TERMS = [
-        "data analytics platform",  "investigative analytics",
-        "law enforcement analytics", "police analytics",
-        "crime analytics",           "digital evidence platform",
-        "offender management system","community supervision",
-        "records management system", "intelligence platform",
-        "entity resolution",         "data integration platform",
-        "predictive policing",        "artificial intelligence policing",
-        "machine learning justice",   "digital forensics platform",
-        "custody management system",  "body worn video analytics",
-        "national intelligence",      "police national database",
-        "case management system police",
-        "criminal justice data",
+        "data analytics policing",
+        "law enforcement data platform",
+        "investigative analytics",
+        "crime analytics platform",
+        "police data platform",
+        "offender management system",
+        "community supervision technology",
+        "custody management system",
+        "digital evidence platform",
+        "body worn video analytics",
+        "intelligence platform police",
+        "records management police",
+        "predictive policing analytics",
+        "artificial intelligence policing",
+        "machine learning criminal justice",
+        "data integration law enforcement",
+        "entity resolution identity",
+        "federated search police",
     ]
+
     for term in TERMS:
         try:
+            # Try OCDS API with keyword param
             r = requests.get(
                 FTS_API,
-                params={"updatedFrom": from_dt, "updatedTo": to_dt, "limit": 100,
-                        "keyword": term},
+                params={"updatedFrom": from_dt, "updatedTo": to_dt,
+                        "limit": 100, "keyword": term},
                 headers={**HEADERS, "Accept": "application/json"}, timeout=20,
             )
-            if r.status_code != 200:
-                continue
-            for rel in r.json().get("releases", []):
-                opp = _extract_fts_opp(rel, "Find a Tender")
-                if not opp or opp.notice_id in seen:
-                    continue
-                seen.add(opp.notice_id)
-                results.append(score_opportunity(opp))
+            if r.status_code == 200:
+                for rel in r.json().get("releases", []):
+                    opp = _extract_fts_opp(rel, "Find a Tender")
+                    if not opp or opp.notice_id in seen:
+                        continue
+                    seen.add(opp.notice_id)
+                    scored = score_opportunity(opp)
+                    if scored.tier != "⛔ Not a Fit" and scored.score > 0:
+                        results.append(scored)
             time.sleep(0.3)
         except Exception as e:
             print(f"[FTS/KW] '{term}': {e}")
 
-    relevant = [o for o in results if o.score > 0 and o.tier != "⛔ Not a Fit"]
-    print(f"[FTS/Keyword] {len(results)} fetched → {len(relevant)} scored relevant")
-    return relevant
+    print(f"[FTS/Keyword] {len(results)} scored relevant")
+    return results
+
 
 
 # ---------------------------------------------------------------------------
