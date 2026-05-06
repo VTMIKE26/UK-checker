@@ -1,27 +1,30 @@
 """
-Peregrine UK Daily Federal Scanner
-===================================
-Searches UK public procurement for opportunities matching Peregrine's
-9 capability clusters. Sources:
-  - Find a Tender Service (FTS) OCDS API — no key required
-  - Contracts Finder API (below-threshold, England) — no key required
-  - UK Government news / policy RSS feeds
-  - Competitor intelligence via Google News (UK edition)
+Peregrine UK Daily Scanner
+===========================
+Finds UK public procurement opportunities matching Peregrine's capabilities
+across all five official UK procurement portals.
 
-Delivers a ranked HTML digest via SendGrid email.
+Key insight (Procurement Act 2023, in force Feb 2025):
+  Find a Tender now covers ALL UK procurement lifecycle — pipeline through
+  termination — for England, Wales, and Northern Ireland. Scotland remains
+  on Public Contracts Scotland for below-threshold.
+
+Strategy:
+  1. FTS OCDS API — filtered by RELEVANT CPV codes only (IT/software/LE)
+     This is far more precise than keyword-only searching
+  2. FTS keyword searches — for Peregrine-specific terms with hard scoring
+  3. Sell2Wales RSS — Welsh public sector (Police Wales, probation, councils)
+  4. PCS keyword RSS — Scottish public sector (Police Scotland, SPS, COPFS)
+  5. Competitor intelligence — Google News UK per competitor
+  6. UK policing/justice news feeds
 """
 
 from __future__ import annotations
-import os
-import re
-import time
-import json
-import xml.etree.ElementTree as ET
+import os, re, time, xml.etree.ElementTree as ET
 from html import unescape
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from typing import Optional
-
 import requests
 
 # ---------------------------------------------------------------------------
@@ -31,243 +34,255 @@ SENDGRID_API_KEY = os.environ.get("SENDGRID_API_KEY", "")
 EMAIL_TO         = os.environ.get("EMAIL_TO", "")
 EMAIL_FROM       = os.environ.get("EMAIL_FROM", "")
 
-HEADERS = {
-    "User-Agent": "PeregrineUKScanner/1.0",
-    "Accept":     "application/json",
-}
+HEADERS = {"User-Agent": "PeregrineUKScanner/2.0 (+peregrine.io)", "Accept": "application/json"}
 
-# UK-relevant CPV codes for IT/software/data services
-# These are EU standard procurement classification codes used in UK tenders
-UK_RELEVANT_CPV = {
-    "72000000": "IT services",
-    "72200000": "Software programming and consultancy",
-    "72300000": "Data services",
-    "72400000": "Internet services",
-    "72500000": "Computer-related services",
-    "72600000": "Computer support and consultancy",
-    "72700000": "Computer network services",
-    "72800000": "Computer audit and testing services",
-    "72900000": "Miscellaneous computer-related services",
-    "48000000": "Software package and information systems",
-    "48600000": "Database and operating software",
-    "48800000": "Information systems and servers",
-    "48900000": "Miscellaneous software packages",
-    "73000000": "Research and development services",
-    "79000000": "Business services",
-    "79100000": "Legal services",
-    "79400000": "Business and management consultancy",
-    "79500000": "Office-support services",
-    "79600000": "Recruitment services",
-    "75000000": "Administration, defence, social security",
-    "75100000": "Administration services",
-    "75200000": "Provision of services to the community",
-    "75231000": "Detention or rehabilitation services",
-    "75240000": "Public security, law and order",
-    "75241000": "Public security services",
-    "75242000": "Law-enforcement services",
-    "92000000": "Recreational, cultural, sporting services",
-}
+# ---------------------------------------------------------------------------
+# CPV CODE STRATEGY
+# ---------------------------------------------------------------------------
+# These CPV codes represent IT/software/data services and law enforcement.
+# Filtering by CPV is MORE RELIABLE than keyword search because:
+#   - Every UK tender must declare a CPV code by law
+#   - CPV 722-729 = IT services (always relevant)
+#   - CPV 480 = Software packages (always relevant)
+#   - CPV 752 = Law enforcement services (always relevant)
+#   - CPV 751 = Public administration (potentially relevant)
+#   - CPV 730 = R&D services (potentially relevant for AI/data)
 
-# CPV prefixes that are ALWAYS relevant regardless of title
-ALWAYS_RELEVANT_CPV = {
+# CPV prefixes where we ALWAYS keep the result (IT/software/LE)
+ALWAYS_RELEVANT_CPV_PREFIXES = {
     "722", "723", "724", "725", "726", "727", "728", "729",  # IT services
-    "480", "486", "488", "489",  # Software
-    "752",  # Law enforcement
+    "480", "481", "482", "483", "484", "485", "486", "487", "488", "489",  # Software
+    "752",  # Law enforcement / public security
+}
+
+# CPV prefixes where we keep ONLY if also keyword-scored > 0
+CONDITIONAL_CPV_PREFIXES = {
+    "721",  # IT consultancy
+    "730",  # R&D services
+    "751",  # Public administration
+    "753",  # Compulsory social security
+    "792",  # Investigation / security services
+    "634",  # Postal/courier (sometimes case file services)
+}
+
+CPV_LABELS = {
+    "722": "IT services: consulting, software dev, internet",
+    "723": "Data processing services",
+    "724": "Internet services",
+    "725": "Computer-related services",
+    "726": "Computer-related services",
+    "727": "Computer network services",
+    "728": "Computer audit and testing",
+    "729": "Miscellaneous computer services",
+    "480": "Software packages and information systems",
+    "752": "Law enforcement / public security services",
+    "721": "IT consultancy services",
+    "730": "Research and development services",
+    "751": "Administration services",
 }
 
 # ---------------------------------------------------------------------------
-# SCORING ENGINE (same 9 clusters as US scanner)
+# TARGET BUYER TYPES
+# ---------------------------------------------------------------------------
+# We post-score by buyer type — these are Peregrine's actual customer types
+# Matching any of these in the buyer name adds a relevance boost
+
+TIER1_BUYERS = [
+    # Police forces
+    "police", "constabulary", "met police", "metropolitan police",
+    "city of london police", "british transport police",
+    # Justice / corrections
+    "ministry of justice", "hm prison", "hmpps", "national probation",
+    "hmps", "youth offending", "youth justice board",
+    # National agencies
+    "national crime agency", "nca", "serious fraud office",
+    "crown prosecution service", "cps",
+    "home office", "home department",
+    "uk border force", "immigration enforcement",
+    # Intelligence
+    "national counter terrorism", "nctp",
+    "joint terrorism analysis",
+]
+
+TIER2_BUYERS = [
+    # Central government with data/analytics needs
+    "cabinet office", "hmrc", "dwp", "department for work",
+    "ministry of defence", "mod", "dstl",
+    "department of health", "nhsx", "nhs digital", "nhs england",
+    # Devolved policing/justice
+    "police scotland", "scottish prison service", "crown office",
+    "procurator fiscal", "northern ireland courts",
+    "psni", "police service of northern ireland",
+    # Local government (LE adjacent)
+    "probation", "youth offending team", "safeguarding",
+    # CCS / frameworks
+    "crown commercial service", "government digital service", "gds",
+    "central digital",
+]
+
+# ---------------------------------------------------------------------------
+# SCORING ENGINE
 # ---------------------------------------------------------------------------
 CAPABILITY_CLUSTERS = [
-    (
-        "Data Integration & Unification", 20,
-        [
-            "data integration", "data unification", "data fusion", "data silos",
-            "data harmonisation", "data harmonization", "enterprise data platform",
-            "data consolidation", "data normalisation", "data normalization",
-            "data pipeline", "data fabric", "data lake", "data warehouse",
-            "data mesh", "data analytics", "analytics platform", "analytics tool",
-            "data management", "data management platform", "data solution",
-            "data platform", "analytics solution", "business intelligence",
-            "software platform", "enterprise software", "cloud platform",
-            "information sharing", "master data",
-        ],
-    ),
-    (
-        "Investigative & Operational Analytics", 20,
-        [
-            "investigative analytics", "investigative platform",
-            "link analysis", "relationship mapping",
-            "situational awareness", "operational intelligence",
-            "crime analytics", "crime analysis", "advanced analytics",
-            "intelligence platform", "real-time analytics", "predictive analytics",
-            "geospatial analysis", "geospatial intelligence",
-            "digital evidence", "evidence review platform",
-            "evidence analytics", "evidence management platform",
-            "digital forensics platform", "investigative data platform",
-            "body worn video analytics", "bwv analytics",
-        ],
-    ),
-    (
-        "Federated & Enterprise Search", 20,
-        [
-            "federated search", "enterprise search", "cross-system search",
-            "unified search", "cross-database search",
-            "multi-source search", "search federation",
-            "information retrieval", "knowledge base search",
-        ],
-    ),
-    (
-        "Entity Resolution & Record Intelligence", 20,
-        [
-            "entity resolution", "record deduplication", "record linkage",
-            "duplicate records", "identity resolution", "identity matching",
-            "record matching", "data deduplication", "entity matching",
-            "knowledge graph", "person resolution", "fuzzy matching",
-            "probabilistic matching", "golden record", "data quality",
-        ],
-    ),
-    (
-        "Secure Government SaaS", 15,
-        [
-            "cyber essentials", "official sensitive", "jsig", "iso 27001",
-            "cloud security", "secure cloud", "government cloud",
-            "g-cloud", "gcloud", "govcloud", "zero trust",
-            "identity and access management", "iam",
-            "audit logging", "il2", "il3", "il4", "official-sensitive",
-            "dsp toolkit", "cyber security",
-        ],
-    ),
-    (
-        "Public Safety & Law Enforcement", 20,
-        [
-            "law enforcement platform", "law enforcement software",
-            "law enforcement analytics", "law enforcement data",
-            "law enforcement technology", "police data", "police analytics",
-            "policing platform", "policing software", "policing analytics",
-            "public safety platform", "public safety software",
-            "public safety technology", "public safety data",
-            "public safety analytics", "public safety system",
-            "records management system", "crime recording system",
-            "custody suite", "custody management",
-            "computer aided dispatch", "cad system",
-            "serious and organised crime", "intelligence management",
-            "national intelligence model",  # nim removed — matches "minimum","minimise"
-            "fusion centre", "fusion center",
-            "digital forensics", "digital investigation",
-            "body worn video", "body worn camera", "bwv",
-            "automatic number plate recognition", "anpr",
-            "stop and search data", "use of force data",
-        ],
-    ),
-    (
-        "Corrections & Community Supervision", 20,
-        [
-            "community supervision", "probation", "parole",
-            "offender management", "prison management", "prisoner management",
-            "case management", "rehabilitation", "reoffending",
-            "her majesty's prison", "hmpps", "hmps", "noms",
-            "youth offending", "youth justice", "yot",
-            "electronic monitoring", "electronic tagging",
-            "curfew monitoring", "offender data",
-            "community payback", "unpaid work",
-        ],
-    ),
-    (
-        "Platform Modernisation & Replacement", 20,
-        [
-            "platform replacement", "incumbent replacement",
-            "platform consolidation", "legacy platform",
-            "legacy system", "legacy modernisation", "legacy modernization",
-            "platform modernisation", "platform modernization",
-            "it modernisation", "it modernization",
-            "digital transformation", "cloud migration",
-            "software modernisation", "application modernisation",
-            "palantir", "demica", "niche", "xhibit",
-        ],
-    ),
-    (
-        "AI & Machine Learning", 22,
-        [
-            "artificial intelligence", "machine learning",
-            "ai/ml", "ai platform", "ai solution", "ai system",
-            " generative ai", "generative ai ",
-            "large language model", "llm",
-            "natural language processing", "nlp",
-            "computer vision", "predictive model",
-            "decision support", "automated analysis",
-            "ai-powered", "ai-driven",
-            "responsible ai", "explainable ai",
-            "ai governance", "ai analytics", "predictive analytics",
-        ],
-    ),
+    ("Data Integration & Unification", 20, [
+        "data integration", "data unification", "data fusion",
+        "data harmonisation", "data harmonization", "enterprise data platform",
+        "data consolidation", "data normalisation", "data normalization",
+        "data pipeline", "data fabric", "data lake", "data warehouse",
+        "data mesh", "data analytics", "analytics platform",
+        "data management platform", "data solution", "data platform",
+        "analytics solution", "business intelligence",
+        "enterprise software", "cloud platform",
+        "information sharing platform", "master data management",
+    ]),
+    ("Investigative & Operational Analytics", 20, [
+        "investigative analytics", "investigative platform",
+        "link analysis", "relationship mapping",
+        "situational awareness", "operational intelligence",
+        "crime analytics", "crime analysis", "advanced analytics",
+        "intelligence platform", "predictive analytics",
+        "geospatial analysis", "geospatial intelligence",
+        "digital evidence", "evidence review platform",
+        "evidence analytics", "evidence management platform",
+        "digital forensics platform", "investigative data platform",
+        "body worn video analytics",
+    ]),
+    ("Federated & Enterprise Search", 20, [
+        "federated search", "enterprise search", "cross-system search",
+        "unified search", "cross-database search",
+        "multi-source search", "search federation",
+        "information retrieval",
+    ]),
+    ("Entity Resolution & Record Intelligence", 20, [
+        "entity resolution", "record deduplication", "record linkage",
+        "duplicate records", "identity resolution", "identity matching",
+        "record matching", "data deduplication", "entity matching",
+        "knowledge graph", "person resolution", "fuzzy matching",
+        "probabilistic matching", "golden record", "data quality",
+    ]),
+    ("Secure Government SaaS", 15, [
+        "cyber essentials", "official sensitive", "jsig", "iso 27001",
+        "cloud security", "secure cloud", "government cloud",
+        "g-cloud", "gcloud", "zero trust",
+        "identity and access management", "audit logging",
+        "il2", "il3", "il4", "official-sensitive",
+        "dsp toolkit",
+    ]),
+    ("Public Safety & Law Enforcement", 20, [
+        "law enforcement platform", "law enforcement software",
+        "law enforcement analytics", "law enforcement data",
+        "law enforcement technology", "police data", "police analytics",
+        "policing platform", "policing software", "policing analytics",
+        "public safety platform", "public safety software",
+        "public safety technology", "public safety data",
+        "public safety analytics", "public safety system",
+        "records management system", "crime recording system",
+        "custody suite", "custody management",
+        "computer aided dispatch", "cad system",
+        "serious and organised crime", "intelligence management",
+        "national intelligence model",
+        "fusion centre", "fusion center",
+        "digital forensics", "digital investigation",
+        "body worn video", "body worn camera", "bwv",
+        "automatic number plate recognition", "anpr",
+        "stop and search data", "use of force data",
+        "police national database", "pnd", "pnc",
+        "national police systems", "connect system",
+    ]),
+    ("Corrections & Community Supervision", 20, [
+        "community supervision", "probation", "parole",
+        "offender management", "prison management", "prisoner management",
+        "case management system", "rehabilitation technology",
+        "hmpps", "hmps", "noms", "her majesty's prison",
+        "youth offending", "youth justice",
+        "electronic monitoring", "electronic tagging",
+        "curfew monitoring", "offender data",
+        "community payback", "unpaid work",
+        "reoffending", "desistance",
+    ]),
+    ("Platform Modernisation & Replacement", 20, [
+        "platform replacement", "incumbent replacement",
+        "platform consolidation", "legacy platform",
+        "legacy system", "legacy modernisation", "legacy modernization",
+        "platform modernisation", "platform modernization",
+        "it modernisation", "it modernization",
+        "digital transformation", "cloud migration",
+        "software modernisation", "application modernisation",
+        "system replacement programme",
+        "palantir", "niche", "xhibit",
+    ]),
+    ("AI & Machine Learning", 22, [
+        "artificial intelligence", "machine learning",
+        "ai/ml", "ai platform", "ai solution", "ai system",
+        " generative ai", "generative ai ",
+        "large language model", "llm",
+        "natural language processing", "nlp",
+        "computer vision", "predictive model",
+        "decision support system", "automated analysis",
+        "ai-powered", "ai-driven",
+        "responsible ai", "explainable ai",
+        "ai governance", "ai analytics",
+    ]),
 ]
 
 HARD_EXCLUSIONS = [
-    # Physical facilities
-    "fire suppression", "fire alarm", "hvac", "plumbing", "electrical installation",
-    "roof replacement", "flooring", "window replacement", "elevator", "lift maintenance",
+    # Physical facilities & construction
+    "fire suppression", "fire alarm system", "hvac", "plumbing",
+    "electrical installation", "roof replacement", "flooring contract",
+    "window replacement", "lift maintenance", "elevator maintenance",
     "lighting installation", "cctv installation", "camera installation",
-    # Physical goods procurement
-    "uniform", "stationery", "office furniture", "catering", "cleaning supplies",
-    "medical supplies", "pharmaceutical", "food supply", "laundry",
-    # Construction / estates
-    "construction", "refurbishment", "building works", "estates management",
-    "facilities management", "grounds maintenance", "landscaping", "janitorial",
-    # Hardware-only (no software)
-    "body armour", "taser", "firearms", "ammunition", "vehicle purchase",
-    "fleet procurement", "radio procurement", "handheld radio",
-    # Military / defence equipment
-    "crypto modernisation", "avionics", "missile", "munitions", "weapons system",
-    "aircraft maintenance", "naval vessel", "armoured vehicle",
-    # Network/telecom infrastructure
-    "vpn service", "ethernet", "network cabling", "structured cabling",
-    "fibre optic", "wide area network", "wan circuit",
-    "mobile network", "cellular contract",
-    # Maintenance agreements (non-software)
-    "annual maintenance agreement", "hardware maintenance", "server maintenance",
-    "preventive maintenance", "pma maintenance",
-    # Professional services unrelated to Peregrine
-    "translation services", "interpretation services",
-    "legal representation", "solicitor services",
-    "financial audit", "accountancy services",
-    # Staffing only
-    "staffing agency", "temporary staffing", "labour supply",
-    "security guard", "door supervision", "close protection",
-    # Treatment / social services
-    "drug treatment", "alcohol treatment", "mental health treatment",
-    "substance misuse", "domestic abuse refuge", "homeless shelter",
-    "food bank", "welfare benefits",
-    # Training only (not software)
-    "firearms training", "first aid training", "personal safety training",
-    "physical training", "driver training",
-    # Grounds / environment / horticulture
-    "grounds maintenance", "grass maintenance", "hedge maintenance",
+    "grounds maintenance", "grass cutting", "hedge cutting",
     "horticulture", "arboriculture", "tree surgery",
-    "landscaping contract", "grounds keeping",
-    # Maintenance contracts — hardware/equipment/facilities, not software
-    "maintenance contract", "support and maintenance", "break fix",
-    "maintenance and support", "annual support contract",
-    "software assurance",  # Microsoft/Oracle licence renewals, not platforms
+    "landscaping", "grounds keeping", "cleaning contract",
+    "waste management", "recycling contract",
+    # Physical goods
+    "uniform supply", "workwear", "stationery supply",
+    "office furniture", "catering services", "food supply",
+    "medical supplies", "pharmaceutical", "laundry services",
+    "body armour", "taser", "firearms", "ammunition",
+    "vehicle purchase", "fleet management",
+    "radio equipment", "handheld devices procurement",
+    # Construction
+    "construction works", "refurbishment works", "building works",
+    "estates management", "facilities management", "janitorial",
+    # Network/telecom (infrastructure, not platforms)
+    "network cabling", "structured cabling",
+    "fibre optic installation", "wide area network service",
+    "mobile phone contract", "cellular service contract",
+    "telephony system", "pbx system", "voip hardware",
+    # Hardware maintenance (not software)
+    "hardware maintenance contract", "server hardware support",
     "printer maintenance", "copier maintenance", "mfd maintenance",
-    "lift maintenance", "escalator maintenance",
-    "asset management contract", "reactive maintenance",
     "planned preventive maintenance", "ppm contract",
-    # Network / connectivity — not Peregrine's market
-    "network maintenance", "network support contract",
-    "connectivity solution", "leased line", "mpls",
-    "telephony", "telephone system", "pbx", "voip system",
-    "mobile devices", "mobile phones contract",
-    # Physical security (not software analytics)
-    "access control installation", "intruder alarm",
-    "physical security", "manned guarding", "concierge",
-    # Licensing / reselling only
-    "software licence", "software licensing", "microsoft licence",
-    "oracle licence", "licence renewal", "saas subscription renewal",
+    "reactive maintenance contract",
+    # Licence renewals (not new platforms)
+    "microsoft licence renewal", "oracle licence renewal",
+    "software licence renewal", "saas licence renewal",
+    # Staffing only
+    "staffing agency", "temporary staffing",
+    "security guard services", "door supervision",
+    "close protection services",
+    # Treatment / social (not LE tech)
+    "drug treatment programme", "alcohol treatment",
+    "mental health treatment", "substance misuse services",
+    "domestic abuse refuge", "homeless shelter",
+    "food bank", "welfare benefits",
+    # Training only
+    "firearms training", "first aid training",
+    "physical training contract", "driver training",
+    # Military hardware (not analytics)
+    "crypto modernisation hardware", "avionics", "missile",
+    "munitions", "weapons system", "armoured vehicle",
+    "naval vessel", "aircraft maintenance contract",
+    # Specific non-relevant service types
+    "translation services", "interpretation services",
+    "legal representation", "financial audit",
+    "accountancy services", "actuarial services",
+    "insurance services", "printing services",
+    "mail services", "courier services",
 ]
 
-TIER_STRONG   = 40
-TIER_GOOD     = 15
+TIER_STRONG, TIER_GOOD = 40, 15
 
 
 @dataclass
@@ -275,64 +290,68 @@ class Opportunity:
     title:         str
     notice_id:     str
     buyer:         str
-    posted_date:   str
-    deadline:      str
-    description:   str
-    url:           str
-    opp_type:      str
-    source:        str
-    cpv_code:      str   = ""
+    buyer_type:    str = ""   # tier1 / tier2 / other
+    posted_date:   str = ""
+    deadline:      str = "TBD"
+    description:   str = ""
+    url:           str = ""
+    opp_type:      str = ""
+    source:        str = ""
+    cpv_code:      str = ""
+    cpv_label:     str = ""
     value_gbp:     float = 0.0
-    score:         int   = 0
-    tier:          str   = ""
-    score_reasons: list  = field(default_factory=list)
+    score:         int = 0
+    tier:          str = ""
+    score_reasons: list = field(default_factory=list)
+
+
+def _classify_buyer(buyer_name: str) -> str:
+    b = buyer_name.lower()
+    if any(t in b for t in TIER1_BUYERS):
+        return "tier1"
+    if any(t in b for t in TIER2_BUYERS):
+        return "tier2"
+    return "other"
 
 
 def score_opportunity(opp: Opportunity) -> Opportunity:
-    """Score against 9 capability clusters. Apply hard exclusions first."""
-    text = f" {opp.title} {opp.description} ".lower()
+    text = f" {opp.title} {opp.description} {opp.cpv_label} ".lower()
 
-    # Hard exclusions
+    # Hard exclusions — instant disqualify
     for excl in HARD_EXCLUSIONS:
-        if excl.lower() in text:
+        if excl in text:
             opp.tier = "⛔ Not a Fit"
             opp.score = 0
             return opp
 
-    # CPV code boost — if CPV is clearly IT/software/law enforcement, boost relevance
-    cpv_hint = ""
-    if opp.cpv_code:
-        cpv_prefix = opp.cpv_code[:3]
-        if cpv_prefix in ALWAYS_RELEVANT_CPV:
-            cpv_hint = UK_RELEVANT_CPV.get(opp.cpv_code[:8], "")
-
-    text = f" {opp.title} {opp.description} {cpv_hint} ".lower()
-
-    total_score = 0
-    reasons     = []
-    for cluster_name, cluster_pts, phrases in CAPABILITY_CLUSTERS:
-        matched = [p for p in phrases if p in text]
+    total, reasons = 0, []
+    for cluster_name, pts, phrases in CAPABILITY_CLUSTERS:
+        matched = next((p for p in phrases if p in text), None)
         if matched:
-            total_score += cluster_pts
-            reasons.append(f"✓ {cluster_name}: matched '{matched[0]}'")
+            total += pts
+            reasons.append(f"✓ {cluster_name}: matched '{matched}'")
 
-    opp.score         = total_score
+    # Buyer type bonus — Tier 1 buyers get a lift to surface them higher
+    buyer_type = _classify_buyer(opp.buyer)
+    opp.buyer_type = buyer_type
+    if buyer_type == "tier1" and total > 0:
+        total += 10
+        reasons.append("✓ Priority buyer: Tier 1 law enforcement / justice agency")
+    elif buyer_type == "tier2" and total > 0:
+        total += 5
+        reasons.append("✓ Relevant buyer: government / public safety adjacent")
+
+    opp.score = total
     opp.score_reasons = reasons
-
-    if total_score >= TIER_STRONG:
-        opp.tier = "🟢 Strong Fit"
-    elif total_score >= TIER_GOOD:
-        opp.tier = "🟡 Good Fit"
-    elif total_score > 0:
-        opp.tier = "🔵 Possible Fit"
-    else:
-        opp.tier = "⚪ Low Fit"
-
+    opp.tier = ("🟢 Strong Fit" if total >= TIER_STRONG
+                else "🟡 Good Fit" if total >= TIER_GOOD
+                else "🔵 Possible Fit" if total > 0
+                else "⚪ Low Fit")
     return opp
 
 
 def parse_deadline(date_str: str) -> Optional[datetime]:
-    if not date_str:
+    if not date_str or date_str == "TBD":
         return None
     for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
         try:
@@ -344,627 +363,314 @@ def parse_deadline(date_str: str) -> Optional[datetime]:
 
 def is_expired(opp: Opportunity) -> bool:
     dt = parse_deadline(opp.deadline)
-    if dt and dt < datetime.utcnow() - timedelta(days=1):
-        return True
-    return False
+    return bool(dt and dt < datetime.utcnow() - timedelta(days=1))
 
 
 def clean_url(url: str) -> str:
-    if not url:
-        return ""
-    url = url.strip()
-    if not url.startswith("http"):
-        url = "https://" + url
-    return url
+    url = (url or "").strip()
+    return ("https://" + url) if url and not url.startswith("http") else url
 
 
-# ---------------------------------------------------------------------------
-# SOURCE 1: FIND A TENDER SERVICE (FTS) — OCDS API
-# No API key required. Covers above-threshold UK public tenders.
-# ---------------------------------------------------------------------------
-FTS_BASE = "https://www.find-tender.service.gov.uk/api/1.0"
+def _extract_fts_opp(rel: dict, source_label: str = "Find a Tender") -> Optional[Opportunity]:
+    """Parse one FTS OCDS release into an Opportunity. Returns None if invalid."""
+    tender   = rel.get("tender") or {}
+    uid      = (rel.get("id") or rel.get("ocid") or "").strip()
+    title    = (tender.get("title") or "").strip()
+    status   = tender.get("status", "")
+    if not uid or not title or status in ("cancelled", "withdrawn", "complete"):
+        return None
 
-
-def fetch_find_tender(days_back: int = 30) -> list:
-    """
-    Fetch UK Find a Tender notices via OCDS release packages API.
-    Uses date pagination via cursor to retrieve all recent tenders.
-    Filters by CPV code prefix and keyword scoring.
-    """
-    results   = []
-    seen_ids  = set()
-    today     = datetime.utcnow()
-    from_dt   = (today - timedelta(days=days_back)).strftime("%Y-%m-%dT00:00:00")
-    to_dt     = today.strftime("%Y-%m-%dT23:59:59")
-
-    params  = {
-        "updatedFrom": from_dt,
-        "updatedTo":   to_dt,
-        "limit":       100,
-    }
-    # No stages filter — fetch tender AND planning notices for pipeline coverage
-    page    = 0
-    cursor  = None
-    rate_limited = False
-
-    while not rate_limited:
-        if cursor:
-            params["cursor"] = cursor
-        elif page > 0:
+    buyer_name = (rel.get("buyer") or {}).get("name", "Unknown")
+    for p in rel.get("parties") or []:
+        if "buyer" in (p.get("roles") or []):
+            buyer_name = p.get("name", buyer_name)
             break
 
+    cpv_code  = (tender.get("classification") or {}).get("id", "")
+    cpv_desc  = (tender.get("classification") or {}).get("description", "")
+    cpv_label = CPV_LABELS.get(cpv_code[:3], cpv_desc)
+    deadline  = ((tender.get("tenderPeriod") or {}).get("endDate") or "TBD")
+    value     = float(((tender.get("value") or {}).get("amount") or 0))
+    posted    = (rel.get("date") or datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))[:10]
+    desc      = (tender.get("description") or "")[:2000]
+
+    notice_id_clean = uid.replace("/", "-")
+    url = clean_url(f"https://www.find-tender.service.gov.uk/Notice/{notice_id_clean}")
+
+    return Opportunity(
+        title=title, notice_id=uid, buyer=buyer_name,
+        posted_date=posted, deadline=deadline,
+        description=f"{desc} {cpv_desc}"[:2000],
+        url=url, opp_type=(rel.get("tag") or ["tender"])[0],
+        source=source_label, cpv_code=cpv_code, cpv_label=cpv_label,
+        value_gbp=value,
+    )
+
+
+# ---------------------------------------------------------------------------
+# SOURCE 1: FTS — CPV-FILTERED (most precise)
+# ---------------------------------------------------------------------------
+FTS_API = "https://www.find-tender.service.gov.uk/api/1.0/ocdsReleasePackages"
+
+def fetch_fts_by_cpv(days_back: int = 60) -> list:
+    """
+    Fetch FTS tenders filtered by relevant CPV code prefixes.
+    This is the most precise method — every IT/software/LE tender
+    must declare a CPV code so nothing relevant is missed.
+    """
+    results, seen = [], set()
+    today   = datetime.utcnow()
+    from_dt = (today - timedelta(days=days_back)).strftime("%Y-%m-%dT00:00:00")
+    to_dt   = today.strftime("%Y-%m-%dT23:59:59")
+
+    cursor = None
+    pages  = 0
+    while pages < 20:  # max 2000 tenders per run
+        params = {"updatedFrom": from_dt, "updatedTo": to_dt, "limit": 100}
+        if cursor:
+            params["cursor"] = cursor
         try:
-            r = requests.get(
-                f"{FTS_BASE}/ocdsReleasePackages",
-                params=params,
-                headers={**HEADERS, "Accept": "application/json"},
-                timeout=30,
-            )
+            r = requests.get(FTS_API, params=params,
+                             headers={**HEADERS, "Accept": "application/json"}, timeout=30)
             if r.status_code == 429:
-                retry = int(r.headers.get("Retry-After", 30))
-                print(f"[FTS] Rate limited — waiting {retry}s")
-                time.sleep(retry)
+                time.sleep(int(r.headers.get("Retry-After", 30)))
                 continue
             if r.status_code != 200:
-                print(f"[FTS] HTTP {r.status_code}")
+                print(f"[FTS/CPV] HTTP {r.status_code}")
                 break
-
             data     = r.json()
             releases = data.get("releases", [])
             if not releases:
                 break
-
             for rel in releases:
-                tender = rel.get("tender", {})
-                notice_id = rel.get("id", "")
-                ocid      = rel.get("ocid", "")
-                uid       = notice_id or ocid
-                if not uid or uid in seen_ids:
+                opp = _extract_fts_opp(rel, "Find a Tender")
+                if not opp or opp.notice_id in seen:
                     continue
-                seen_ids.add(uid)
-
-                title      = (tender.get("title") or "").strip()
-                desc       = (tender.get("description") or "").strip()
-                status     = tender.get("status", "")
-                if status in ("cancelled", "withdrawn", "complete"):
+                cpv_prefix = opp.cpv_code[:3] if opp.cpv_code else ""
+                # Keep if CPV is always relevant, or if CPV is conditional
+                if cpv_prefix not in ALWAYS_RELEVANT_CPV_PREFIXES and \
+                   cpv_prefix not in CONDITIONAL_CPV_PREFIXES:
                     continue
-                if not title:
-                    continue
-
-                # Buyer
-                buyer_info = rel.get("buyer", {})
-                buyer_name = buyer_info.get("name", "Unknown")
-                parties    = rel.get("parties", [])
-                for p in parties:
-                    if "buyer" in p.get("roles", []):
-                        buyer_name = p.get("name", buyer_name)
-                        break
-
-                # CPV code
-                cpv_code = tender.get("classification", {}).get("id", "")
-                cpv_desc = tender.get("classification", {}).get("description", "")
-
-                # Deadline
-                deadline = (tender.get("tenderPeriod", {}) or {}).get("endDate", "TBD")
-
-                # Value
-                value    = 0.0
-                val_obj  = tender.get("value", {}) or {}
-                if val_obj.get("amount"):
-                    value = float(val_obj["amount"])
-
-                # URL
-                notice_url = clean_url(
-                    f"https://www.find-tender.service.gov.uk/Notice/{notice_id}"
-                    if notice_id else f"https://www.find-tender.service.gov.uk"
-                )
-
-                # Posted date
-                posted = rel.get("date", today.strftime("%Y-%m-%dT%H:%M:%SZ"))[:10]
-
-                opp = Opportunity(
-                    title       = title,
-                    notice_id   = uid,
-                    buyer       = buyer_name,
-                    posted_date = posted,
-                    deadline    = deadline,
-                    description = f"{desc} {cpv_desc}"[:2000],
-                    url         = notice_url,
-                    opp_type    = rel.get("tag", ["tender"])[0] if rel.get("tag") else "tender",
-                    source      = "Find a Tender",
-                    cpv_code    = cpv_code,
-                    value_gbp   = value,
-                )
+                seen.add(opp.notice_id)
                 results.append(score_opportunity(opp))
-
-            # Pagination
             cursor = data.get("cursor")
             if not cursor or len(releases) < 100:
                 break
-            page += 1
-            time.sleep(0.5)
-
+            pages += 1
+            time.sleep(0.4)
         except Exception as e:
-            print(f"[FTS] Error: {e}")
+            print(f"[FTS/CPV] {e}")
             break
 
-    # Return anything that scored > 0 via keyword matching OR has a relevant CPV code
-    # Also return low-fit items with relevant CPV so they appear in Low Fit section
-    relevant = []
-    for o in results:
-        cpv_prefix = o.cpv_code[:3] if o.cpv_code else ""
-        if o.score > 0 or cpv_prefix in ALWAYS_RELEVANT_CPV:
-            relevant.append(o)
+    # Filter: keep scored > 0 OR CPV always-relevant even if score is 0
+    relevant = [o for o in results
+                if o.score > 0 or o.cpv_code[:3] in ALWAYS_RELEVANT_CPV_PREFIXES]
+    # But exclude ⛔ Not a Fit
+    relevant = [o for o in relevant if o.tier != "⛔ Not a Fit"]
 
-    print(f"[FTS] {len(results)} total tenders fetched → {len(relevant)} relevant")
-    print(f"[FTS] Score breakdown: Strong={sum(1 for o in relevant if 'Strong' in o.tier)}, "
-          f"Good={sum(1 for o in relevant if 'Good' in o.tier)}, "
-          f"Possible={sum(1 for o in relevant if 'Possible' in o.tier)}, "
-          f"Low={sum(1 for o in relevant if o.tier == chr(9898)+' Low Fit')}")
+    print(f"[FTS/CPV] {len(results)} CPV-matched → {len(relevant)} scored relevant")
     return relevant
 
 
 # ---------------------------------------------------------------------------
-# SOURCE 2: CONTRACTS FINDER (below-threshold, England, no key)
+# SOURCE 2: FTS — KEYWORD SEARCH (Peregrine-specific terms)
 # ---------------------------------------------------------------------------
-CF_BASE = "https://www.contractsfinder.service.gov.uk/Published/Notice/OCDS/Search"
-
-
-def fetch_contracts_finder(days_back: int = 30) -> list:
+def fetch_fts_by_keyword(days_back: int = 90) -> list:
     """
-    UK Contracts Finder — below-threshold opportunities in England.
-    Uses keyword searches via the published notices API.
+    FTS keyword title searches for Peregrine-specific terms.
+    Complements CPV search for tenders that might use generic CPV codes.
     """
-    results  = []
-    seen_ids = set()
-    today    = datetime.utcnow()
-    from_dt  = (today - timedelta(days=days_back)).strftime("%Y-%m-%dT00:00:00")
-    to_dt    = today.strftime("%Y-%m-%dT23:59:59")
-
-    # Keyword searches — same terms as US scanner
-    SEARCH_TERMS = [
-        "data analytics", "data integration", "artificial intelligence",
-        "machine learning", "investigative platform", "police analytics",
-        "community supervision", "offender management", "digital evidence",
-        "law enforcement technology", "public safety platform",
-        "records management system", "federated search",
-        "entity resolution", "digital transformation",
-        "it modernisation", "platform modernisation",
-        "crime analytics", "intelligence platform",
-        "predictive analytics", "cyber security platform",
-    ]
-
-    for term in SEARCH_TERMS:
-        try:
-            r = requests.get(
-                CF_BASE,
-                params={
-                    "NoticeType":          "Contract notice",
-                    "IsPublished":         "true",
-                    "SearchText":          term,
-                    "PublishedFrom":       from_dt,
-                    "PublishedTo":         to_dt,
-                    "SortBy":              "PublicationDateDescending",
-                    "Size":                100,
-                    "Skip":                0,
-                },
-                headers=HEADERS, timeout=20,
-            )
-            if r.status_code == 429:
-                time.sleep(15)
-                continue
-            if r.status_code != 200:
-                continue
-
-            for rel in r.json().get("releases", []):
-                tender    = rel.get("tender", {})
-                notice_id = rel.get("id", "")
-                if not notice_id or notice_id in seen_ids:
-                    continue
-                seen_ids.add(notice_id)
-
-                title  = (tender.get("title") or "").strip()
-                desc   = (tender.get("description") or "").strip()
-                if not title:
-                    continue
-
-                buyer_info = rel.get("buyer", {})
-                buyer_name = buyer_info.get("name", "Unknown")
-
-                cpv_code = tender.get("classification", {}).get("id", "")
-                cpv_desc = tender.get("classification", {}).get("description", "")
-                deadline = (tender.get("tenderPeriod", {}) or {}).get("endDate", "TBD")
-                value    = float((tender.get("value", {}) or {}).get("amount", 0) or 0)
-                posted   = rel.get("date", today.strftime("%Y-%m-%dT%H:%M:%SZ"))[:10]
-                notice_url = clean_url(
-                    f"https://www.contractsfinder.service.gov.uk/Notice/{notice_id}"
-                )
-
-                opp = Opportunity(
-                    title       = title,
-                    notice_id   = notice_id,
-                    buyer       = buyer_name,
-                    posted_date = posted,
-                    deadline    = deadline,
-                    description = f"{desc} {cpv_desc}"[:2000],
-                    url         = notice_url,
-                    opp_type    = "Contract Notice",
-                    source      = "Contracts Finder",
-                    cpv_code    = cpv_code,
-                    value_gbp   = value,
-                )
-                results.append(score_opportunity(opp))
-            time.sleep(0.3)
-        except Exception as e:
-            print(f"[ContractsFinder] '{term}': {e}")
-
-    print(f"[Contracts Finder] {len(results)} opportunities")
-    return results
-
-
-# ---------------------------------------------------------------------------
-# SOURCE 3: CONTRACTS FINDER V2 API (correct search endpoint)
-# ---------------------------------------------------------------------------
-CF_SEARCH_URL = "https://www.contractsfinder.service.gov.uk/Published/Notice/OCDS/Search"
-
-# ---------------------------------------------------------------------------
-# SOURCE 3b: PUBLIC CONTRACTS SCOTLAND — RSS keyword feeds
-# PCS doesn't have a public JSON API but publishes keyword RSS feeds
-# ---------------------------------------------------------------------------
-def fetch_public_contracts_scotland() -> list:
-    """
-    Public Contracts Scotland via Google News UK search.
-    PCS RSS is blocked in many environments; Google News surfaces PCS notices
-    that are indexed publicly. Also fetches via FTS with Scottish buyer filter.
-    """
-    results  = []
-    seen_ids = set()
-    today    = datetime.utcnow()
-
-    # Scottish government body name fragments for post-filtering FTS results
-    SCOTTISH_BUYERS = [
-        "scotland", "scottish", "police scotland", "crown office",
-        "procurator fiscal", "scottish prison", "scottish government",
-        "glasgow", "edinburgh", "aberdeen", "dundee", "highland council",
-        "fife council", "south lanarkshire", "north lanarkshire",
-    ]
-
-    # Search FTS with 90-day window but filter to Scottish buyers
-    from_dt = (today - timedelta(days=90)).strftime("%Y-%m-%dT00:00:00")
+    results, seen = [], set()
+    today   = datetime.utcnow()
+    from_dt = (today - timedelta(days=days_back)).strftime("%Y-%m-%dT00:00:00")
     to_dt   = today.strftime("%Y-%m-%dT23:59:59")
 
-    SCOT_TERMS = [
-        "data analytics", "artificial intelligence", "digital evidence",
-        "investigative platform", "community supervision", "offender management",
-        "police analytics", "records management", "intelligence platform",
+    # Specific compound terms that strongly signal Peregrine fit
+    TERMS = [
+        "data analytics platform",  "investigative analytics",
+        "law enforcement analytics", "police analytics",
+        "crime analytics",           "digital evidence platform",
+        "offender management system","community supervision",
+        "records management system", "intelligence platform",
+        "entity resolution",         "data integration platform",
+        "predictive policing",        "artificial intelligence policing",
+        "machine learning justice",   "digital forensics platform",
+        "custody management system",  "body worn video analytics",
+        "national intelligence",      "police national database",
+        "case management system police",
+        "criminal justice data",
     ]
-
-    for term in SCOT_TERMS:
+    for term in TERMS:
         try:
             r = requests.get(
-                "https://www.find-tender.service.gov.uk/api/1.0/ocdsReleasePackages",
-                params={"updatedFrom": from_dt, "updatedTo": to_dt, "limit": 100},
-                headers={**HEADERS, "Accept": "application/json"},
-                timeout=20,
+                FTS_API,
+                params={"updatedFrom": from_dt, "updatedTo": to_dt, "limit": 100,
+                        "keyword": term},
+                headers={**HEADERS, "Accept": "application/json"}, timeout=20,
             )
             if r.status_code != 200:
-                break
-            for rel in r.json().get("releases", []):
-                tender = rel.get("tender", {})
-                uid    = rel.get("id") or rel.get("ocid", "")
-                if not uid or uid in seen_ids:
-                    continue
-                title  = (tender.get("title") or "").strip()
-                if not title:
-                    continue
-                # Check if buyer is Scottish
-                buyer_name = rel.get("buyer", {}).get("name", "")
-                for p in rel.get("parties", []):
-                    if "buyer" in p.get("roles", []):
-                        buyer_name = p.get("name", buyer_name)
-                        break
-                if not any(frag in buyer_name.lower() for frag in SCOTTISH_BUYERS):
-                    continue
-                seen_ids.add(uid)
-                desc     = (tender.get("description") or "")[:2000]
-                deadline = (tender.get("tenderPeriod", {}) or {}).get("endDate", "TBD")
-                value    = float((tender.get("value", {}) or {}).get("amount", 0) or 0)
-                cpv_code = tender.get("classification", {}).get("id", "")
-                posted   = rel.get("date", today.strftime("%Y-%m-%dT%H:%M:%SZ"))[:10]
-                opp = Opportunity(
-                    title=title, notice_id=f"PCS-{uid}",
-                    buyer=buyer_name, posted_date=posted,
-                    deadline=deadline, description=desc,
-                    url=clean_url(f"https://www.find-tender.service.gov.uk/Notice/{uid}"),
-                    opp_type="Scottish Tender", source="Public Contracts Scotland",
-                    cpv_code=cpv_code, value_gbp=value,
-                )
-                results.append(score_opportunity(opp))
-            time.sleep(0.3)
-        except Exception as e:
-            print(f"[PCS] '{term}': {e}")
-            break
-
-    print(f"[Public Contracts Scotland] {len(results)} opportunities")
-    return results
-
-
-
-# ---------------------------------------------------------------------------
-# SOURCE 3c: GOV.UK DIGITAL MARKETPLACE
-# ---------------------------------------------------------------------------
-def fetch_digital_marketplace() -> list:
-    """
-    Digital Marketplace opportunities via the correct API endpoint.
-    Uses applytosupply.digitalmarketplace.service.gov.uk for live briefs.
-    Falls back to FTS search for DOS/G-Cloud framework notices.
-    """
-    results  = []
-    seen_ids = set()
-    today    = datetime.utcnow()
-
-    # Fetch live briefs from Digital Marketplace
-    # The brief search API is at /digital-outcomes-and-specialists/opportunities
-    DM_ENDPOINTS = [
-        "https://www.applytosupply.digitalmarketplace.service.gov.uk/api/briefs?status=live&framework=digital-outcomes-and-specialists-7&per_page=100",
-        "https://www.applytosupply.digitalmarketplace.service.gov.uk/api/briefs?status=live&framework=digital-outcomes-and-specialists-6&per_page=100",
-    ]
-    for endpoint in DM_ENDPOINTS:
-        try:
-            r = requests.get(endpoint, headers={**HEADERS, "Accept": "application/json"}, timeout=20)
-            if r.status_code != 200:
-                print(f"[DigitalMarketplace] {endpoint[-40:]}: HTTP {r.status_code}")
                 continue
-            data  = r.json()
-            briefs = data.get("briefs", [])
-            print(f"[DigitalMarketplace] {len(briefs)} briefs from {endpoint[-40:]}")
-            for b in briefs:
-                bid = str(b.get("id", ""))
-                if not bid or bid in seen_ids:
-                    continue
-                title   = (b.get("title") or "").strip()
-                org     = (b.get("organisation") or b.get("organisationName") or "UK Public Sector").strip()
-                lot     = (b.get("lotName") or b.get("lot") or "").strip()
-                closed  = b.get("applicationsClosedAt") or b.get("clarificationQuestionsClosedAt") or "TBD"
-                pub     = (b.get("publishedAt") or "")[:10]
-                summary = (b.get("summary") or b.get("specialistRole") or b.get("requirementsLength") or "")[:500]
-                if not title:
-                    continue
-                seen_ids.add(bid)
-                opp = Opportunity(
-                    title=title, notice_id=f"DM-{bid}",
-                    buyer=org, posted_date=pub,
-                    deadline=closed, description=f"{summary} Lot: {lot}",
-                    url=clean_url(f"https://www.digitalmarketplace.service.gov.uk/digital-outcomes-and-specialists/opportunities/{bid}"),
-                    opp_type=f"Digital Marketplace ({lot})",
-                    source="Digital Marketplace",
-                )
-                results.append(score_opportunity(opp))
-            time.sleep(0.5)
-        except Exception as e:
-            print(f"[DigitalMarketplace] {e}")
-
-    # Fallback: search FTS for G-Cloud/DOS framework notices
-    if not results:
-        try:
-            from_dt = (today - timedelta(days=30)).strftime("%Y-%m-%dT00:00:00")
-            to_dt   = today.strftime("%Y-%m-%dT23:59:59")
-            r = requests.get(
-                "https://www.find-tender.service.gov.uk/api/1.0/ocdsReleasePackages",
-                params={"updatedFrom": from_dt, "updatedTo": to_dt, "limit": 100},
-                headers={**HEADERS, "Accept": "application/json"},
-                timeout=20,
-            )
-            if r.status_code == 200:
-                for rel in r.json().get("releases", []):
-                    tender = rel.get("tender", {})
-                    uid    = rel.get("id") or rel.get("ocid", "")
-                    title  = (tender.get("title") or "").strip()
-                    buyer  = rel.get("buyer", {}).get("name", "")
-                    # Filter: buyer is Crown Commercial Service or framework reference
-                    desc = (tender.get("description") or "").lower()
-                    if not ("g-cloud" in desc or "digital outcomes" in desc or
-                            "crown commercial" in buyer.lower() or
-                            "digital marketplace" in desc):
-                        continue
-                    if not uid or uid in seen_ids or not title:
-                        continue
-                    seen_ids.add(uid)
-                    opp = Opportunity(
-                        title=title, notice_id=f"DM-FTS-{uid}",
-                        buyer=buyer, posted_date=rel.get("date","")[:10],
-                        deadline=(tender.get("tenderPeriod",{}) or {}).get("endDate","TBD"),
-                        description=(tender.get("description") or "")[:2000],
-                        url=clean_url(f"https://www.find-tender.service.gov.uk/Notice/{uid}"),
-                        opp_type="Digital Marketplace / CCS Framework",
-                        source="Digital Marketplace",
-                    )
-                    results.append(score_opportunity(opp))
-        except Exception as e:
-            print(f"[DigitalMarketplace fallback] {e}")
-
-    print(f"[Digital Marketplace] {len(results)} opportunities")
-    return results
-
-
-# ---------------------------------------------------------------------------
-# SOURCE 3d: MOD & HOME OFFICE — filter FTS results by buyer
-# ---------------------------------------------------------------------------
-def fetch_mod_defence_contracts() -> list:
-    """
-    MoD, Home Office, GCHQ, and intelligence community tenders.
-    Filters the FTS OCDS feed by buyer organisation name rather than
-    scraping the DCO website (which requires login).
-    """
-    results  = []
-    seen_ids = set()
-    today    = datetime.utcnow()
-    from_dt  = (today - timedelta(days=90)).strftime("%Y-%m-%dT00:00:00")
-    to_dt    = today.strftime("%Y-%m-%dT23:59:59")
-
-    DEFENCE_BUYERS = [
-        "ministry of defence", "mod", "defence science",
-        "dstl", "defence and security",
-        "home office", "home department",
-        "national crime agency", "nca",
-        "mi5", "mi6", "gchq", "hmrc",
-        "border force", "serious fraud office",
-    ]
-
-    DEFENCE_TERMS = [
-        "data analytics", "artificial intelligence", "digital evidence",
-        "investigative platform", "intelligence platform",
-        "data integration", "machine learning", "surveillance analytics",
-    ]
-
-    for term in DEFENCE_TERMS:
-        try:
-            r = requests.get(
-                "https://www.find-tender.service.gov.uk/api/1.0/ocdsReleasePackages",
-                params={"updatedFrom": from_dt, "updatedTo": to_dt, "limit": 100},
-                headers={**HEADERS, "Accept": "application/json"},
-                timeout=20,
-            )
-            if r.status_code != 200:
-                break
             for rel in r.json().get("releases", []):
-                uid    = rel.get("id") or rel.get("ocid", "")
-                tender = rel.get("tender", {})
-                title  = (tender.get("title") or "").strip()
-                if not title or not uid or uid in seen_ids:
+                opp = _extract_fts_opp(rel, "Find a Tender")
+                if not opp or opp.notice_id in seen:
                     continue
-                buyer_name = rel.get("buyer", {}).get("name", "")
-                for p in rel.get("parties", []):
-                    if "buyer" in p.get("roles", []):
-                        buyer_name = p.get("name", buyer_name)
-                        break
-                if not any(frag in buyer_name.lower() for frag in DEFENCE_BUYERS):
-                    continue
-                seen_ids.add(uid)
-                desc     = (tender.get("description") or "")[:2000]
-                deadline = (tender.get("tenderPeriod", {}) or {}).get("endDate", "TBD")
-                value    = float((tender.get("value", {}) or {}).get("amount", 0) or 0)
-                cpv_code = tender.get("classification", {}).get("id", "")
-                posted   = rel.get("date", today.strftime("%Y-%m-%dT%H:%M:%SZ"))[:10]
-                opp = Opportunity(
-                    title=title, notice_id=f"MOD-{uid}",
-                    buyer=buyer_name, posted_date=posted,
-                    deadline=deadline, description=desc,
-                    url=clean_url(f"https://www.find-tender.service.gov.uk/Notice/{uid}"),
-                    opp_type="Defence/Security Tender", source="MOD / Home Office",
-                    cpv_code=cpv_code, value_gbp=value,
-                )
+                seen.add(opp.notice_id)
                 results.append(score_opportunity(opp))
             time.sleep(0.3)
         except Exception as e:
-            print(f"[MOD] '{term}': {e}")
-            break
+            print(f"[FTS/KW] '{term}': {e}")
 
-    print(f"[MOD / Home Office] {len(results)} opportunities")
-    return results
+    relevant = [o for o in results if o.score > 0 and o.tier != "⛔ Not a Fit"]
+    print(f"[FTS/Keyword] {len(results)} fetched → {len(relevant)} scored relevant")
+    return relevant
 
 
 # ---------------------------------------------------------------------------
-# SOURCE 3e: GOV.UK GOVERNMENT GRANTS — UKRI / Home Office / MoJ grants
+# SOURCE 3: SELL2WALES — Welsh public sector RSS
 # ---------------------------------------------------------------------------
-def fetch_uk_government_grants() -> list:
-    """
-    GOV.UK grants — innovation and technology funding.
-    UKRI, Innovate UK, Home Office Science, MoJ DSTL grants.
-    Uses the GOV.UK grants search RSS.
-    """
-    items    = []
-    seen     = set()
-    today    = datetime.utcnow()
+S2W_RSS = "https://www.sell2wales.gov.wales/Search/Search_Rss.aspx"
 
-    grant_searches = [
-        ("Home Office Science",     "home+office+science+data+technology"),
-        ("MoJ Innovation",          "ministry+of+justice+technology+innovation"),
-        ("UKRI Policing",           "UKRI+policing+data+analytics"),
-        ("Innovate UK Safety",      "Innovate+UK+public+safety+AI"),
-        ("DSTL",                    "DSTL+data+analytics+intelligence"),
+def fetch_sell2wales() -> list:
+    """
+    Sell2Wales — official procurement portal for Welsh public sector.
+    Covers Police Wales, Welsh Government, Welsh NHS, councils.
+    Uses the public keyword RSS feed.
+    """
+    results, seen = [], set()
+    today = datetime.utcnow()
+
+    TERMS = [
+        "data analytics", "artificial intelligence", "police",
+        "digital evidence", "community supervision", "offender management",
+        "records management", "intelligence platform", "machine learning",
+        "digital transformation", "investigative", "criminal justice",
     ]
-
-    for label, query in grant_searches:
-        url = f"https://news.google.com/rss/search?q={query}+grant+funding&hl=en-GB&gl=GB&ceid=GB:en"
+    for term in TERMS:
         try:
-            r = requests.get(url, headers={
-                "User-Agent": "Mozilla/5.0 (compatible; PeregrineUKScanner/1.0)",
-                "Accept": "application/rss+xml",
-            }, timeout=15)
+            r = requests.get(S2W_RSS, params={"term": term},
+                             headers={"User-Agent": HEADERS["User-Agent"],
+                                      "Accept": "application/rss+xml"},
+                             timeout=15)
             if r.status_code != 200:
                 continue
             root = ET.fromstring(r.content)
-            for item in root.findall(".//item")[:3]:
-                t_el = item.find("title")
-                l_el = item.find("link")
-                d_el = item.find("description")
-                p_el = item.find("pubDate")
-                title = (t_el.text or "").strip() if t_el is not None else ""
-                desc  = unescape(re.sub(r"<[^>]+>","", (d_el.text or ""))).strip() if d_el is not None else ""
-                url_  = (l_el.text or "").strip() if l_el is not None else ""
-                date_ = (p_el.text or "").strip() if p_el is not None else ""
-                if not title or title in seen:
+            for item in root.findall(".//item")[:10]:
+                guid  = (item.find("guid") or item.find("link"))
+                title_el = item.find("title")
+                link_el  = item.find("link")
+                desc_el  = item.find("description")
+                date_el  = item.find("pubDate")
+                title  = (title_el.text or "").strip() if title_el is not None else ""
+                desc   = unescape(re.sub(r"<[^>]+>","", (desc_el.text or ""))).strip() if desc_el is not None else ""
+                url_   = (link_el.text or "").strip() if link_el is not None else ""
+                date_  = (date_el.text or "").strip() if date_el is not None else ""
+                uid    = (guid.text if guid is not None else url_) or url_
+                if not title or uid in seen:
                     continue
-                combined = f"{title} {desc}".lower()
-                if not any(kw in combined for kw in ["grant","fund","invest","award","ukri","innovate"]):
-                    continue
-                seen.add(title)
-                items.append({
-                    "type":       "🇬🇧 UK Government Grant",
-                    "title":      title,
-                    "agency":     label,
-                    "summary":    desc[:300],
-                    "url":        clean_url(url_),
-                    "open_date":  date_[:10],
-                    "close_date": "",
-                    "source":     "Google News (UK)",
-                    "relevance":  label,
-                })
+                seen.add(uid)
+                opp = Opportunity(
+                    title=title, notice_id=f"S2W-{hash(uid) % 10**9}",
+                    buyer="Welsh Public Body", posted_date=date_[:10],
+                    deadline="TBD", description=desc,
+                    url=clean_url(url_), opp_type="Welsh Tender",
+                    source="Sell2Wales",
+                )
+                results.append(score_opportunity(opp))
             time.sleep(0.2)
         except Exception as e:
-            print(f"[UKGrants] {label}: {e}")
+            print(f"[Sell2Wales] '{term}': {e}")
 
-    print(f"[UK Government Grants] {len(items)} signals")
-    return items
+    relevant = [o for o in results if o.score > 0 and o.tier != "⛔ Not a Fit"]
+    print(f"[Sell2Wales] {len(results)} fetched → {len(relevant)} relevant")
+    return relevant
 
 
 # ---------------------------------------------------------------------------
-# SOURCE 3: UK COMPETITOR INTELLIGENCE
-# UK-specific competitors + Google News UK edition
+# SOURCE 4: PUBLIC CONTRACTS SCOTLAND — keyword RSS
+# ---------------------------------------------------------------------------
+PCS_RSS = "https://www.publiccontractsscotland.gov.uk/search/Search_Rss.aspx"
+
+def fetch_public_contracts_scotland() -> list:
+    """
+    Public Contracts Scotland — covers Police Scotland, Scottish Prison
+    Service, COPFS, Scottish Government, 32 councils, NHS Scotland.
+    """
+    results, seen = [], set()
+    today = datetime.utcnow()
+
+    TERMS = [
+        "data analytics", "artificial intelligence", "police",
+        "digital evidence", "community supervision", "offender management",
+        "records management", "intelligence platform", "machine learning",
+        "criminal justice", "investigative platform",
+    ]
+    for term in TERMS:
+        try:
+            r = requests.get(PCS_RSS, params={"term": term},
+                             headers={"User-Agent": HEADERS["User-Agent"],
+                                      "Accept": "application/rss+xml"},
+                             timeout=15)
+            if r.status_code != 200:
+                continue
+            root = ET.fromstring(r.content)
+            for item in root.findall(".//item")[:10]:
+                guid_el  = item.find("guid")
+                title_el = item.find("title")
+                link_el  = item.find("link")
+                desc_el  = item.find("description")
+                date_el  = item.find("pubDate")
+                title = (title_el.text or "").strip() if title_el is not None else ""
+                desc  = unescape(re.sub(r"<[^>]+>","", (desc_el.text or ""))).strip() if desc_el is not None else ""
+                url_  = (link_el.text or "").strip() if link_el is not None else ""
+                uid   = (guid_el.text if guid_el is not None else url_) or url_
+                date_ = (date_el.text or "").strip() if date_el is not None else ""
+                if not title or uid in seen:
+                    continue
+                seen.add(uid)
+                # Extract buyer from description (PCS puts it in description)
+                buyer = desc[:80] if desc else "Scottish Public Body"
+                opp = Opportunity(
+                    title=title, notice_id=f"PCS-{hash(uid) % 10**9}",
+                    buyer=buyer, posted_date=date_[:10],
+                    deadline="TBD", description=desc,
+                    url=clean_url(url_), opp_type="Scottish Tender",
+                    source="Public Contracts Scotland",
+                )
+                results.append(score_opportunity(opp))
+            time.sleep(0.2)
+        except Exception as e:
+            print(f"[PCS] '{term}': {e}")
+
+    relevant = [o for o in results if o.score > 0 and o.tier != "⛔ Not a Fit"]
+    print(f"[Public Contracts Scotland] {len(results)} fetched → {len(relevant)} relevant")
+    return relevant
+
+
+# ---------------------------------------------------------------------------
+# COMPETITOR INTELLIGENCE
 # ---------------------------------------------------------------------------
 UK_COMPETITORS = [
-    # US players with major UK presence
-    ("Palantir UK",         "Palantir+UK+government+police+law+enforcement"),
-    ("Axon UK",             "Axon+UK+police+body+worn+camera+technology"),
+    ("Palantir UK",         "Palantir+UK+government+police+data"),
+    ("Axon UK",             "Axon+Enterprise+UK+police+technology"),
     ("Motorola Solutions",  "Motorola+Solutions+UK+police+public+safety"),
-    ("IBM i2",              "IBM+i2+UK+law+enforcement+intelligence"),
-    ("Databricks",          "Databricks+UK+government+public+sector"),
-    # UK-native and Europe-based competitors
-    ("Civica",              "Civica+UK+law+enforcement+public+safety+software"),
-    ("NEC UK",              "NEC+UK+police+biometric+identity+recognition"),
-    ("Hexagon",             "Hexagon+UK+police+CAD+records+management"),
-    ("NICE Systems",        "NICE+UK+public+safety+analytics"),
-    ("Capita",              "Capita+UK+justice+public+safety+data"),
-    ("Sopra Steria",        "Sopra+Steria+UK+police+digital+transformation"),
+    ("IBM i2",              "IBM+i2+UK+intelligence+analytics"),
+    ("Civica",              "Civica+UK+law+enforcement+police+software"),
+    ("NEC UK",              "NEC+UK+police+facial+recognition+biometrics"),
+    ("Hexagon Safety",      "Hexagon+UK+police+CAD+records+management"),
+    ("Capita Justice",      "Capita+UK+justice+probation+data"),
+    ("Sopra Steria",        "Sopra+Steria+UK+police+justice+digital"),
     ("CGI UK",              "CGI+UK+police+criminal+justice+technology"),
-    # Specialist UK competitors
-    ("Vigil AI",            "Vigil+AI+UK+police+data+analytics"),
-    ("Forensic Analytics",  "Forensic+Analytics+UK+police+data"),
-    ("i-nexus",             "i-nexus+UK+law+enforcement+intelligence"),
+    ("BAE Systems Detica",  "BAE+Detica+UK+police+intelligence+analytics"),
+    ("Unison / Fujitsu",    "Fujitsu+UK+police+national+systems"),
 ]
 
-
-def fetch_uk_competitor_intel() -> list[dict]:
-    items      = []
-    seen       = set()
-
-    # Google News UK edition per competitor
+def fetch_uk_competitor_intel() -> list:
+    items, seen = [], set()
     for comp_name, query in UK_COMPETITORS:
         url = f"https://news.google.com/rss/search?q={query}&hl=en-GB&gl=GB&ceid=GB:en"
         try:
             r = requests.get(url, headers={
-                "User-Agent": "Mozilla/5.0 (compatible; PeregrineUKScanner/1.0)",
+                "User-Agent": "Mozilla/5.0 (compatible; PeregrineUKScanner/2.0)",
                 "Accept": "application/rss+xml",
             }, timeout=15)
             if r.status_code != 200:
@@ -974,99 +680,78 @@ def fetch_uk_competitor_intel() -> list[dict]:
             for item in root.findall(".//item"):
                 if count >= 2:
                     break
-                t_el = item.find("title")
-                l_el = item.find("link")
-                d_el = item.find("description")
-                p_el = item.find("pubDate")
+                t_el = item.find("title");  l_el = item.find("link")
+                d_el = item.find("description"); p_el = item.find("pubDate")
                 title = (t_el.text or "").strip() if t_el is not None else ""
-                desc  = unescape(re.sub(r"<[^>]+>", "", (d_el.text or ""))).strip() if d_el is not None else ""
+                desc  = unescape(re.sub(r"<[^>]+>","", (d_el.text or ""))).strip() if d_el is not None else ""
                 url_  = (l_el.text or "").strip() if l_el is not None else ""
                 date_ = (p_el.text or "").strip() if p_el is not None else ""
                 if not title or title in seen:
                     continue
                 seen.add(title)
-                items.append({
-                    "competitor": comp_name,
-                    "title":      title,
-                    "url":        clean_url(url_),
-                    "source":     "Google News (UK)",
-                    "date":       date_[:16] if date_ else "",
-                    "summary":    desc[:300],
-                })
+                items.append({"competitor": comp_name, "title": title,
+                              "url": clean_url(url_), "source": "Google News (UK)",
+                              "date": date_[:16], "summary": desc[:300]})
                 count += 1
             time.sleep(0.2)
         except Exception as e:
-            print(f"[UKCompetitor] {comp_name}: {e}")
-
+            print(f"[CompIntel] {comp_name}: {e}")
     print(f"[UK Competitor Intel] {len(items)} signals")
     return items
 
 
 # ---------------------------------------------------------------------------
-# SOURCE 4: UK INDUSTRY NEWS
+# UK INDUSTRY NEWS
 # ---------------------------------------------------------------------------
 UK_NEWS_FEEDS = [
     {"url": "https://www.publictechnology.net/feed/",             "source": "PublicTechnology"},
     {"url": "https://www.policeoracle.com/rss/news.xml",          "source": "PoliceOracle"},
-    {"url": "https://www.gov.uk/search/news-and-communications.atom?keywords=policing+data",
-     "source": "GOV.UK Policing"},
-    {"url": "https://www.gov.uk/search/news-and-communications.atom?keywords=criminal+justice+technology",
-     "source": "GOV.UK CJ Tech"},
-    {"url": "https://www.lgcplus.com/feed/",                      "source": "LGC"},
-    {"url": "https://www.computerweekly.com/rss/IT-security.xml", "source": "Computer Weekly"},
     {"url": "https://www.ukauthority.com/feed/",                  "source": "UKAuthority"},
-    {"url": "https://statescoop.com/feed/",                       "source": "StateScoop"},
-    {"url": "https://defensescoop.com/feed/",                     "source": "DefenseScoop"},
+    {"url": "https://www.gov.uk/search/news-and-communications.atom?keywords=policing+data+analytics", "source": "GOV.UK Policing"},
+    {"url": "https://www.gov.uk/search/news-and-communications.atom?keywords=criminal+justice+technology", "source": "GOV.UK Justice"},
+    {"url": "https://www.computerweekly.com/rss/Latest-IT-news.xml", "source": "Computer Weekly"},
+    {"url": "https://techscoop.co.uk/feed/",                      "source": "TechScoop"},
 ]
 
-UK_NEWS_KEYWORDS = [
+UK_KW = [
     "law enforcement", "policing", "public safety", "data analytics",
     "artificial intelligence", "machine learning", "criminal justice",
-    "home office", "ministry of justice", "national police", "met police",
-    "probation service", "prison service", "hmpps",
-    "digital transformation", "records management", "digital evidence",
-    "predictive policing", "intelligence platform", "surveillance",
+    "home office", "ministry of justice", "national police",
+    "probation", "prison", "hmpps", "digital transformation",
+    "records management", "digital evidence", "predictive",
+    "intelligence platform", "surveillance data",
 ]
 
-
-def fetch_uk_industry_news() -> list[dict]:
-    news = []
-    seen = set()
+def fetch_uk_industry_news() -> list:
+    news, seen = [], set()
     for feed in UK_NEWS_FEEDS:
         try:
             r = requests.get(feed["url"], headers={
-                "User-Agent":  HEADERS["User-Agent"],
-                "Accept":      "application/rss+xml, application/xml, text/xml, application/atom+xml",
+                "User-Agent": HEADERS["User-Agent"],
+                "Accept": "application/rss+xml, application/xml, text/xml, application/atom+xml",
             }, timeout=15)
             if r.status_code != 200:
                 continue
             root = ET.fromstring(r.content)
-            # Handle both RSS and Atom
-            items = root.findall(".//item") or root.findall(".//{http://www.w3.org/2005/Atom}entry")
-            for item in items[:15]:
-                t_el = item.find("title") or item.find("{http://www.w3.org/2005/Atom}title")
-                l_el = item.find("link")  or item.find("{http://www.w3.org/2005/Atom}link")
-                d_el = item.find("description") or item.find("{http://www.w3.org/2005/Atom}summary")
-                p_el = item.find("pubDate") or item.find("{http://www.w3.org/2005/Atom}published")
+            NS = "http://www.w3.org/2005/Atom"
+            items = root.findall(".//item") or root.findall(f".//{{{NS}}}entry")
+            for item in items[:20]:
+                t_el = item.find("title") or item.find(f"{{{NS}}}title")
+                l_el = item.find("link")  or item.find(f"{{{NS}}}link")
+                d_el = item.find("description") or item.find(f"{{{NS}}}summary")
+                p_el = item.find("pubDate") or item.find(f"{{{NS}}}published")
                 title = (t_el.text or "").strip() if t_el is not None else ""
-                desc  = unescape(re.sub(r"<[^>]+>", "", (d_el.text or ""))).strip() if d_el is not None else ""
-                url_  = ""
-                if l_el is not None:
-                    url_ = l_el.get("href", l_el.text or "").strip()
+                desc  = unescape(re.sub(r"<[^>]+>","", (d_el.text or ""))).strip() if d_el is not None else ""
+                url_  = (l_el.get("href", l_el.text or "") if l_el is not None else "").strip()
                 date_ = (p_el.text or "").strip() if p_el is not None else ""
                 if not title or title in seen:
                     continue
-                combined = f"{title} {desc}".lower()
-                if not any(kw in combined for kw in UK_NEWS_KEYWORDS):
+                if not any(kw in f"{title} {desc}".lower() for kw in UK_KW):
                     continue
                 seen.add(title)
-                news.append({
-                    "title":   title,
-                    "url":     clean_url(url_),
-                    "source":  feed["source"],
-                    "date":    date_[:16],
-                    "summary": desc[:250],
-                })
+                news.append({"title": title, "url": clean_url(url_),
+                             "source": feed["source"], "date": date_[:16],
+                             "summary": desc[:250]})
             time.sleep(0.2)
         except Exception as e:
             print(f"[UKNews] {feed['source']}: {e}")
@@ -1075,11 +760,10 @@ def fetch_uk_industry_news() -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# EMAIL RENDERING
+# DEDUP & RANK
 # ---------------------------------------------------------------------------
 def deduplicate_and_rank(opps: list) -> list:
-    seen = set()
-    out  = []
+    seen, out = set(), []
     for o in sorted(opps, key=lambda x: x.score, reverse=True):
         if is_expired(o):
             continue
@@ -1091,34 +775,31 @@ def deduplicate_and_rank(opps: list) -> list:
 
 
 def _fmt_value(val: float) -> str:
-    if val <= 0:
-        return ""
-    if val >= 1_000_000:
-        return f" · £{val/1_000_000:.1f}m"
-    if val >= 1000:
-        return f" · £{val/1000:.0f}k"
+    if val <= 0:    return ""
+    if val >= 1e6:  return f" · £{val/1e6:.1f}m"
+    if val >= 1000: return f" · £{val/1000:.0f}k"
     return f" · £{val:,.0f}"
 
 
+# ---------------------------------------------------------------------------
+# EMAIL RENDERING
+# ---------------------------------------------------------------------------
 def build_opps_section(title: str, opps: list) -> str:
     if not opps:
         return ""
     rows = ""
     for o in opps[:20]:
-        link = (
-            f'<a href="{o.url}" style="font-weight:700;font-size:14px;color:#003078;text-decoration:none;">{o.title[:120]}</a>'
-            if o.url
-            else f'<span style="font-weight:700;font-size:14px;color:#111;">{o.title[:120]}</span>'
-        )
+        link = (f'<a href="{o.url}" style="font-weight:700;font-size:14px;color:#003078;text-decoration:none;">{o.title[:120]}</a>'
+                if o.url else f'<span style="font-weight:700;font-size:14px;color:#111;">{o.title[:120]}</span>')
         reasons_html = ""
         if o.score_reasons:
             bullets = "".join(f"<li>{r}</li>" for r in o.score_reasons[:4])
             reasons_html = (
-                '<div style="margin-top:8px;padding:6px 10px;background:#f8fafd;'
+                '<div style="margin-top:8px;padding:6px 10px;background:#f0f4ff;'
                 'border-left:3px solid #003078;border-radius:0 4px 4px 0;">'
-                '<div style="font-size:11px;font-weight:700;color:#003078;margin-bottom:4px;'
+                '<div style="font-size:11px;font-weight:700;color:#003078;margin-bottom:3px;'
                 'text-transform:uppercase;letter-spacing:0.5px;">Why It Fits</div>'
-                f'<ul style="margin:0;padding-left:18px;font-size:12px;color:#555;">{bullets}</ul>'
+                f'<ul style="margin:0;padding-left:16px;font-size:12px;color:#444;line-height:1.6;">{bullets}</ul>'
                 '</div>'
             )
         deadline_html = ""
@@ -1126,160 +807,98 @@ def build_opps_section(title: str, opps: list) -> str:
             dt = parse_deadline(o.deadline)
             if dt:
                 days = (dt - datetime.utcnow()).days
-                if days <= 7:
-                    deadline_html = f' <span style="background:#d4351c;color:#fff;font-size:10px;padding:1px 6px;border-radius:8px;">Due in {days}d</span>'
-                elif days <= 30:
+                if 0 <= days <= 7:
+                    deadline_html = f' <span style="background:#d4351c;color:#fff;font-size:10px;padding:1px 6px;border-radius:8px;font-weight:600;">Due in {days}d</span>'
+                elif 0 <= days <= 30:
                     deadline_html = f' <span style="background:#f47738;color:#fff;font-size:10px;padding:1px 6px;border-radius:8px;">Due in {days}d</span>'
-
-        value_str = _fmt_value(o.value_gbp)
+        buyer_badge = ""
+        if o.buyer_type == "tier1":
+            buyer_badge = ' <span style="background:#003078;color:#fff;font-size:9px;padding:1px 5px;border-radius:8px;">🎯 Priority</span>'
+        elif o.buyer_type == "tier2":
+            buyer_badge = ' <span style="background:#505a5f;color:#fff;font-size:9px;padding:1px 5px;border-radius:8px;">Relevant</span>'
         rows += (
-            '<div style="border:1px solid #e8e8e8;border-radius:6px;padding:12px;margin-bottom:10px;background:#fff;">'
+            '<div style="border:1px solid #e0e0e0;border-radius:6px;padding:12px;margin-bottom:10px;background:#fff;">'
             f'<div style="margin-bottom:5px;">{link}{deadline_html}</div>'
-            f'<div style="font-size:12px;color:#666;">🏛 {o.buyer[:80]} &nbsp;·&nbsp; 📬 {o.posted_date[:10]}{value_str}</div>'
+            f'<div style="font-size:12px;color:#555;">🏛 {o.buyer[:80]}{buyer_badge} &nbsp;·&nbsp; 📬 {o.posted_date[:10]}{_fmt_value(o.value_gbp)}</div>'
             f'<div style="font-size:11px;color:#999;margin-top:2px;">Source: {o.source} &nbsp;·&nbsp; Score: {o.score}pts'
-            + (f' &nbsp;·&nbsp; CPV: {o.cpv_code}' if o.cpv_code else "")
-            + f' &nbsp;·&nbsp; <a href="{o.url}" style="color:#003078;">View Notice</a></div>'
-            f'{reasons_html}'
-            '</div>'
+            + (f' &nbsp;·&nbsp; CPV: {o.cpv_code} ({o.cpv_label[:30]})' if o.cpv_code else "")
+            + f' &nbsp;·&nbsp; <a href="{o.url}" style="color:#003078;">View</a></div>'
+            f'{reasons_html}</div>'
         )
-    return (
-        f'<div style="margin:20px 0 6px">'
-        f'<h2 style="font-size:16px;color:#111;border-bottom:2px solid #eee;padding-bottom:5px;">{title} ({len(opps)})</h2>'
-        f'{rows}</div>'
-    )
+    return (f'<div style="margin:20px 0 6px">'
+            f'<h2 style="font-size:16px;color:#111;border-bottom:2px solid #eee;padding-bottom:5px;">{title} ({len(opps)})</h2>'
+            f'{rows}</div>')
 
 
-def build_competitor_section_uk(intel_items: list) -> str:
-    if not intel_items:
+def build_competitor_section(intel: list) -> str:
+    if not intel:
         return ""
     from collections import defaultdict
     grouped = defaultdict(list)
-    for item in intel_items:
+    for item in intel:
         grouped[item["competitor"]].append(item)
-
     rows = ""
-    for comp_name in sorted(grouped.keys()):
-        stories = grouped[comp_name][:2]
-        story_html = ""
+    for comp in sorted(grouped):
+        stories = grouped[comp][:2]
+        sh = ""
         for s in stories:
-            link = (
-                f'<a href="{s["url"]}" style="color:#003078;text-decoration:none;font-weight:600;">{s["title"][:90]}</a>'
-                if s.get("url")
-                else f'<span style="font-weight:600;color:#333;">{s["title"][:90]}</span>'
-            )
-            ns = ("<div style='font-size:12px;color:#555;margin-top:2px;'>" + s.get("summary","")[:200] + "</div>") if s.get("summary") else ""
-            story_html += (
-                '<div style="margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid #f0f0f0;">'
-                f'<div style="font-size:13px;">{link}</div>'
-                f'<div style="font-size:11px;color:#888;margin-top:2px;">{s["source"]} &middot; {s["date"][:10]}</div>'
-                f'{ns}'
-                '</div>'
-            )
-        rows += (
-            f'<div style="margin-bottom:14px;">'
-            f'<div style="font-weight:700;font-size:12px;color:#555;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;">⚔️ {comp_name}</div>'
-            f'{story_html}'
-            '</div>'
-        )
-
-    return (
-        f'<div style="margin:20px 0 6px">'
-        f'<h2 style="font-size:16px;color:#111;border-bottom:2px solid #eee;padding-bottom:5px;">🔎 UK Competitor Intelligence ({len(intel_items)} signals)</h2>'
-        f'<p style="font-size:12px;color:#888;margin:0 0 12px;">Monitoring: {", ".join(c[0] for c in UK_COMPETITORS)}</p>'
-        f'{rows}'
-        '</div>'
-    )
+            link = (f'<a href="{s["url"]}" style="color:#003078;text-decoration:none;font-weight:600;">{s["title"][:90]}</a>'
+                    if s.get("url") else f'<span style="font-weight:600;">{s["title"][:90]}</span>')
+            ns = (f'<div style="font-size:12px;color:#555;margin-top:2px;">{s.get("summary","")[:200]}</div>') if s.get("summary") else ""
+            sh += (f'<div style="margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid #f0f0f0;">'
+                   f'<div style="font-size:13px;">{link}</div>'
+                   f'<div style="font-size:11px;color:#888;margin-top:2px;">{s["source"]} &middot; {s["date"][:10]}</div>'
+                   f'{ns}</div>')
+        rows += (f'<div style="margin-bottom:14px;">'
+                 f'<div style="font-weight:700;font-size:12px;color:#555;margin-bottom:5px;text-transform:uppercase;letter-spacing:0.5px;">⚔️ {comp}</div>'
+                 f'{sh}</div>')
+    return (f'<div style="margin:20px 0 6px">'
+            f'<h2 style="font-size:16px;color:#111;border-bottom:2px solid #eee;padding-bottom:5px;">🔎 UK Competitor Intelligence ({len(intel)} signals)</h2>'
+            f'<p style="font-size:12px;color:#888;margin:0 0 12px;">Monitoring: {", ".join(c[0] for c in UK_COMPETITORS)}</p>'
+            f'{rows}</div>')
 
 
-def build_news_section_uk(news_items: list) -> str:
-    if not news_items:
+def build_news_section(news: list) -> str:
+    if not news:
         return ""
     rows = ""
-    for item in news_items[:12]:
-        link = (
-            f'<a href="{item["url"]}" style="color:#003078;text-decoration:none;font-weight:600;">{item["title"][:100]}</a>'
-            if item.get("url")
-            else f'<span style="font-weight:600;">{item["title"][:100]}</span>'
-        )
-        ni_sum = ("<div style='font-size:12px;color:#555;margin-top:2px;'>" + item.get("summary","")[:200] + "</div>") if item.get("summary") else ""
-        rows += (
-            f'<div style="margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid #f0f0f0;">'
-            f'<div style="font-size:13px;">{link}</div>'
-            f'<div style="font-size:11px;color:#888;margin-top:2px;">{item["source"]} &middot; {item["date"][:10]}</div>'
-            f'{ni_sum}'
-            '</div>'
-        )
-    return (
-        f'<div style="margin:20px 0 6px">'
-        f'<h2 style="font-size:16px;color:#111;border-bottom:2px solid #eee;padding-bottom:5px;">📰 UK Industry News &amp; Market Signals ({len(news_items)})</h2>'
-        f'{rows}'
-        '</div>'
-    )
+    for item in news[:12]:
+        link = (f'<a href="{item["url"]}" style="color:#003078;text-decoration:none;font-weight:600;">{item["title"][:100]}</a>'
+                if item.get("url") else f'<span style="font-weight:600;">{item["title"][:100]}</span>')
+        ns = (f'<div style="font-size:12px;color:#555;margin-top:2px;">{item.get("summary","")[:200]}</div>') if item.get("summary") else ""
+        rows += (f'<div style="margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid #f0f0f0;">'
+                 f'<div style="font-size:13px;">{link}</div>'
+                 f'<div style="font-size:11px;color:#888;margin-top:2px;">{item["source"]} &middot; {item["date"][:10]}</div>'
+                 f'{ns}</div>')
+    return (f'<div style="margin:20px 0 6px">'
+            f'<h2 style="font-size:16px;color:#111;border-bottom:2px solid #eee;padding-bottom:5px;">📰 UK Industry News ({len(news)})</h2>'
+            f'{rows}</div>')
 
 
-def _possible_fits_uk(opps: list, shown: set) -> list:
+def _possible_fits(opps: list, shown: set) -> list:
     def _k(o): return (o.notice_id or o.title[:60].lower()).strip()
-    unseen = [o for o in opps if _k(o) not in shown]
-    possible = [o for o in unseen if "Possible" in o.tier]
-    if possible:
-        return possible
-    KW = ["analytics", "platform", "software", "data integration", "law enforcement analytics"]
-    return sorted(
-        [o for o in unseen if o.tier not in ("⛔ Not a Fit",) and any(k in o.title.lower() for k in KW)],
-        key=lambda x: x.score, reverse=True
-    )[:10]
+    unseen = [o for o in opps if _k(o) not in shown and o.tier != "⛔ Not a Fit"]
+    poss   = [o for o in unseen if "Possible" in o.tier]
+    if poss:
+        return poss
+    return sorted([o for o in unseen if o.buyer_type in ("tier1","tier2")],
+                  key=lambda x: x.score, reverse=True)[:8]
 
 
-
-def build_uk_grants_section(grants: list) -> str:
-    if not grants:
-        return ""
-    rows = ""
-    for g in grants[:10]:
-        link = (f'<a href="{g["url"]}" style="color:#003078;text-decoration:none;font-weight:600;">{g["title"][:100]}</a>'
-                if g.get("url") else f'<span style="font-weight:600;">{g["title"][:100]}</span>')
-        rows += (
-            '<div style="border:1px solid #e8e8e8;border-radius:6px;padding:10px;margin-bottom:8px;background:#fff;">'
-            f'<div style="font-size:11px;font-weight:700;background:#003078;color:#fff;display:inline-block;padding:2px 8px;border-radius:10px;margin-bottom:6px;">{g["type"]}</div>'
-            f'<div style="font-size:13px;margin-bottom:4px;">{link}</div>'
-            f'<div style="font-size:11px;color:#888;">{g["agency"]} &middot; {g["source"]} &middot; {g.get("open_date","")[:10]}</div>'
-            + (f'<div style="font-size:12px;color:#555;margin-top:4px;">{g.get("summary","")[:200]}</div>' if g.get("summary") else "")
-            + '</div>'
-        )
-    return (
-        '<div style="margin:20px 0 6px">'
-        f'<h2 style="font-size:16px;color:#111;border-bottom:2px solid #eee;padding-bottom:5px;">&#x1F4B0; UK Government Grants &amp; Innovation Funding ({len(grants)})</h2>'
-        f'{rows}</div>'
-    )
-
-
-def build_html_email(opps: list, run_date: str,
-                     source_counts: dict,
-                     competitor_items: list,
-                     news_items: list,
-                     uk_grants: list = None) -> str:
-
+def build_html_email(opps: list, run_date: str, source_counts: dict,
+                     competitor_items: list, news_items: list) -> str:
     def _k(o): return (o.notice_id or o.title[:60].lower()).strip()
     def _dedup(lst):
-        seen = set(); out = []
+        seen, out = set(), []
         for o in lst:
             k = _k(o)
             if k not in seen: seen.add(k); out.append(o)
         return out
-
     shown = set()
-    strong_list   = _dedup([o for o in opps if "Strong" in o.tier])
-    shown.update(_k(o) for o in strong_list)
-    good_list     = _dedup([o for o in opps if "Good" in o.tier and _k(o) not in shown])
-    shown.update(_k(o) for o in good_list)
-    possible_list = _dedup([o for o in opps if "Possible" in o.tier and _k(o) not in shown])
-    shown.update(_k(o) for o in possible_list)
-    low_list      = _dedup([o for o in opps if o.tier == "⚪ Low Fit" and o.score > 0 and _k(o) not in shown])
-    shown.update(_k(o) for o in low_list)
-
-    strong   = len(strong_list)
-    good     = len(good_list)
-    possible = len(possible_list)
+    strong = _dedup([o for o in opps if "Strong" in o.tier]); shown.update(_k(o) for o in strong)
+    good   = _dedup([o for o in opps if "Good"   in o.tier and _k(o) not in shown]); shown.update(_k(o) for o in good)
+    poss   = _dedup([o for o in opps if "Possible" in o.tier and _k(o) not in shown]); shown.update(_k(o) for o in poss)
+    low    = _dedup([o for o in opps if o.tier == "⚪ Low Fit" and o.score > 0 and _k(o) not in shown])
 
     sc_rows = "".join(
         f'<tr><td style="padding:3px 10px;color:#555;font-size:12px;">{k}</td>'
@@ -1290,83 +909,52 @@ def build_html_email(opps: list, run_date: str,
     return f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
-body{{font-family:'Helvetica Neue',Arial,sans-serif;background:#f5f5f5;margin:0;padding:0}}
+body{{font-family:'Helvetica Neue',Arial,sans-serif;background:#f0f2f5;margin:0;padding:0}}
 .wrap{{max-width:720px;margin:0 auto;background:#fff;border-radius:8px;overflow:hidden}}
 .header{{background:#003078;padding:24px 28px;color:#fff}}
 .content{{padding:20px 28px}}
 </style></head><body>
 <div class="wrap">
 <div class="header">
-  <div style="font-size:22px;font-weight:700;letter-spacing:-0.5px;">🇬🇧 Peregrine UK Daily Scanner</div>
-  <div style="font-size:14px;opacity:0.85;margin-top:4px;">{run_date}</div>
-  <div style="margin-top:12px;display:flex;gap:16px;flex-wrap:wrap;">
-    <span style="background:rgba(255,255,255,0.2);padding:4px 12px;border-radius:20px;font-size:13px;font-weight:700;">🟢 {strong} Strong</span>
-    <span style="background:rgba(255,255,255,0.2);padding:4px 12px;border-radius:20px;font-size:13px;font-weight:700;">🟡 {good} Good</span>
-    <span style="background:rgba(255,255,255,0.2);padding:4px 12px;border-radius:20px;font-size:13px;font-weight:700;">🔵 {possible} Possible</span>
+  <div style="font-size:22px;font-weight:700;letter-spacing:-0.5px;">&#x1F1EC;&#x1F1E7; Peregrine UK Daily Scanner</div>
+  <div style="font-size:13px;opacity:0.8;margin-top:3px;">{run_date}</div>
+  <div style="margin-top:12px;display:flex;gap:14px;flex-wrap:wrap;">
+    <span style="background:rgba(255,255,255,0.2);padding:4px 12px;border-radius:20px;font-size:13px;font-weight:700;">&#x1F7E2; {len(strong)} Strong</span>
+    <span style="background:rgba(255,255,255,0.2);padding:4px 12px;border-radius:20px;font-size:13px;font-weight:700;">&#x1F7E1; {len(good)} Good</span>
+    <span style="background:rgba(255,255,255,0.2);padding:4px 12px;border-radius:20px;font-size:13px;font-weight:700;">&#x1F535; {len(poss)} Possible</span>
   </div>
 </div>
 <div class="content">
-
   <details style="margin-bottom:16px;border:1px solid #eee;border-radius:6px;padding:8px 12px;">
     <summary style="font-size:12px;color:#888;cursor:pointer;">Sources searched today</summary>
     <table style="margin-top:8px;border-collapse:collapse;">{sc_rows}</table>
   </details>
-
-  {build_opps_section("🟢 Strong Fit — Act Now", strong_list)}
-  {build_opps_section("🟡 Good Fit — Review Today", good_list)}
-  {build_opps_section("🔵 Possible Fit — Review These", _possible_fits_uk(opps, shown))}
-  {build_opps_section("⚪ Low Fit — Any Keyword Match", low_list)}
-  {build_competitor_section_uk(competitor_items)}
-  {build_uk_grants_section(uk_grants or [])}
-  {build_news_section_uk(news_items)}
-
+  {build_opps_section("&#x1F7E2; Strong Fit &#x2014; Act Now", strong)}
+  {build_opps_section("&#x1F7E1; Good Fit &#x2014; Review Today", good)}
+  {build_opps_section("&#x1F535; Possible Fit &#x2014; Review These", _possible_fits(opps, shown))}
+  {build_opps_section("&#x26AA; Low Fit &#x2014; Any Match", low[:10])}
+  {build_competitor_section(competitor_items)}
+  {build_news_section(news_items)}
 </div>
 </div></body></html>"""
 
 
-def send_email(html_body: str, subject: str):
-    print(f"[Email] Preparing to send...")
-    print(f"[Email]   To:   {EMAIL_TO or 'NOT SET'}")
-    print(f"[Email]   From: {EMAIL_FROM or 'NOT SET'}")
-    print(f"[Email]   Key:  {'SET (' + str(len(SENDGRID_API_KEY)) + ' chars)' if SENDGRID_API_KEY else 'NOT SET'}")
-
-    if not SENDGRID_API_KEY:
-        print("[Email] SKIPPED — no SENDGRID_API_KEY")
+def send_email(html: str, subject: str):
+    print(f"[Email] To: {EMAIL_TO or 'NOT SET'} | From: {EMAIL_FROM or 'NOT SET'} | Key: {'SET' if SENDGRID_API_KEY else 'NOT SET'}")
+    if not all([SENDGRID_API_KEY, EMAIL_TO, EMAIL_FROM]):
+        print("[Email] SKIPPED — missing config")
         return
-    if not EMAIL_TO:
-        print("[Email] SKIPPED — no EMAIL_TO")
-        return
-    if not EMAIL_FROM:
-        print("[Email] SKIPPED — no EMAIL_FROM")
-        return
-
-    payload = {
-        "personalizations": [{"to": [{"email": EMAIL_TO}]}],
-        "from":    {"email": EMAIL_FROM, "name": "Peregrine UK Scanner"},
-        "subject": subject,
-        "content": [{"type": "text/html", "value": html_body}],
-    }
     try:
         r = requests.post(
             "https://api.sendgrid.com/v3/mail/send",
-            headers={"Authorization": f"Bearer {SENDGRID_API_KEY}",
-                     "Content-Type": "application/json"},
-            json=payload,
+            headers={"Authorization": f"Bearer {SENDGRID_API_KEY}", "Content-Type": "application/json"},
+            json={"personalizations": [{"to": [{"email": EMAIL_TO}]}],
+                  "from": {"email": EMAIL_FROM, "name": "Peregrine UK Scanner"},
+                  "subject": subject,
+                  "content": [{"type": "text/html", "value": html}]},
             timeout=30,
         )
-        if r.status_code in (200, 202):
-            print(f"[Email] ✓ Sent successfully to {EMAIL_TO} (HTTP {r.status_code})")
-        else:
-            print(f"[Email] ✗ Send failed — HTTP {r.status_code}")
-            print(f"[Email]   Response: {r.text[:500]}")
-            # Common causes:
-            # 401 = bad API key
-            # 403 = sender not verified in SendGrid
-            # 400 = malformed request
-            if r.status_code == 403:
-                print("[Email]   HINT: Sender address not verified in SendGrid.")
-                print(f"[Email]   Go to sendgrid.com → Settings → Sender Authentication")
-                print(f"[Email]   and verify: {EMAIL_FROM}")
+        print(f"[Email] {'OK (HTTP ' + str(r.status_code) + ')' if r.status_code in (200,202) else 'FAILED: ' + str(r.status_code) + ' ' + r.text[:200]}")
     except Exception as e:
         print(f"[Email] Error: {e}")
 
@@ -1378,21 +966,17 @@ def main():
     today    = datetime.utcnow()
     run_date = today.strftime("%d %B %Y")
     sep = "=" * 60
-    print(f"\n{sep}")
-    print(f"  Peregrine UK Daily Scanner --- {run_date}")
-    print(f"{sep}")
+    print(f"\n{sep}\n  Peregrine UK Daily Scanner -- {run_date}\n{sep}")
     print(f"[Config] SENDGRID_API_KEY: {'SET' if SENDGRID_API_KEY else 'NOT SET'}")
-    print(f"[Config] EMAIL_TO:         {EMAIL_TO}")
+    print(f"[Config] EMAIL_TO: {EMAIL_TO}")
 
-    source_counts = {}
-    all_opps      = []
+    source_counts, all_opps = {}, []
 
     opp_sources = [
-        ("Find a Tender",             lambda: fetch_find_tender(days_back=90)),
-        ("Contracts Finder",          lambda: fetch_contracts_finder(days_back=30)),
-        ("Public Contracts Scotland", fetch_public_contracts_scotland),
-        ("Digital Marketplace",       fetch_digital_marketplace),
-        ("MOD Defence Contracts",     fetch_mod_defence_contracts),
+        ("FTS / CPV Filter",           lambda: fetch_fts_by_cpv(days_back=60)),
+        ("FTS / Keyword Search",       lambda: fetch_fts_by_keyword(days_back=90)),
+        ("Sell2Wales",                 fetch_sell2wales),
+        ("Public Contracts Scotland",  fetch_public_contracts_scotland),
     ]
     for label, fn in opp_sources:
         print(f"\n[{label}] Fetching...")
@@ -1405,54 +989,50 @@ def main():
             source_counts[label] = 0
 
     print(f"\n[Scoring] Deduplicating {len(all_opps)} raw results...")
-    ranked   = deduplicate_and_rank(all_opps)
-    strong   = sum(1 for o in ranked if "Strong" in o.tier)
-    good     = sum(1 for o in ranked if "Good" in o.tier)
-    possible = sum(1 for o in ranked if "Possible" in o.tier)
-    print(f"[Tiers] Strong:{strong}  Good:{good}  Possible:{possible}")
+    ranked = deduplicate_and_rank(all_opps)
+    n_strong   = sum(1 for o in ranked if "Strong" in o.tier)
+    n_good     = sum(1 for o in ranked if "Good" in o.tier)
+    n_possible = sum(1 for o in ranked if "Possible" in o.tier)
+    print(f"[Tiers] Strong:{n_strong}  Good:{n_good}  Possible:{n_possible}")
 
     print("\n[UK Competitor Intel] Fetching...")
     try:
         competitor_items = fetch_uk_competitor_intel()
         source_counts["Competitor Intel"] = len(competitor_items)
     except Exception as e:
-        print(f"[UK Competitor Intel] FAILED: {e}")
+        print(f"[Competitor Intel] FAILED: {e}")
         competitor_items = []
-
-    print("\n[UK Government Grants] Fetching...")
-    try:
-        uk_grants = fetch_uk_government_grants()
-        source_counts["UK Grants"] = len(uk_grants)
-    except Exception as e:
-        print(f"[UK Grants] FAILED: {e}")
-        uk_grants = []
 
     print("\n[UK Industry News] Fetching...")
     try:
         news_items = fetch_uk_industry_news()
         source_counts["Industry News"] = len(news_items)
     except Exception as e:
-        print(f"[UK Industry News] FAILED: {e}")
+        print(f"[Industry News] FAILED: {e}")
         news_items = []
 
-    if strong == 0 and good == 0:
+    if n_strong == 0 and n_good == 0:
         subject = f"Peregrine UK Scanner | No Strong Matches | {today.strftime('%d %b')}"
-    elif strong >= 1:
-        subject = f"Peregrine UK Scanner | {strong} Strong - {good} Good - {possible} Possible | {today.strftime('%d %b')}"
+    elif n_strong >= 1:
+        subject = f"Peregrine UK Scanner | {n_strong} Strong - {n_good} Good - {n_possible} Possible | {today.strftime('%d %b')}"
     else:
-        subject = f"Peregrine UK Scanner | {good} Good - {possible} Possible | {today.strftime('%d %b')}"
+        subject = f"Peregrine UK Scanner | {n_good} Good - {n_possible} Possible | {today.strftime('%d %b')}"
 
-    html = build_html_email(ranked, run_date, source_counts, competitor_items, news_items, uk_grants)
-    print(f"[Email] HTML size: {len(html):,} chars")
-    print(f"[Email] Subject:   {subject}")
+    html = build_html_email(ranked, run_date, source_counts, competitor_items, news_items)
+    print(f"[Email] HTML: {len(html):,} chars | Subject: {subject}")
     send_email(html, subject)
 
     fname = f"uk_digest_{today.strftime('%Y%m%d')}.html"
     with open(fname, "w", encoding="utf-8") as f:
         f.write(html)
-    print(f"\n[Done] Digest saved: {fname}")
-    print(f"[Done] Subject: {subject}")
+    print(f"\n[Done] Saved: {fname}")
 
 
 if __name__ == "__main__":
-    main()
+    import traceback
+    try:
+        main()
+    except Exception as e:
+        print(f"[FATAL] {type(e).__name__}: {e}")
+        traceback.print_exc()
+        raise
