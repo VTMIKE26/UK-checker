@@ -388,8 +388,29 @@ def _extract_fts_opp(rel: dict, source_label: str = "Find a Tender") -> Optional
             buyer_name = p.get("name", buyer_name)
             break
 
-    cpv_code  = (tender.get("classification") or {}).get("id", "")
-    cpv_desc  = (tender.get("classification") or {}).get("description", "")
+    # CPV code: try tender.classification first, then items[].additionalClassifications
+    cpv_code = (tender.get("classification") or {}).get("id", "")
+    cpv_desc = (tender.get("classification") or {}).get("description", "")
+    if not cpv_code:
+        # FTS often puts CPV in items additionalClassifications
+        for item in (tender.get("items") or []):
+            for cls in (item.get("additionalClassifications") or []):
+                if cls.get("scheme") == "CPV":
+                    cpv_code = cls.get("id", "")
+                    cpv_desc = cls.get("description", "")
+                    break
+            if cpv_code:
+                break
+    if not cpv_code:
+        # Also check lots
+        for lot in (tender.get("lots") or []):
+            for cls in (lot.get("additionalClassifications") or []):
+                if cls.get("scheme") == "CPV":
+                    cpv_code = cls.get("id", "")
+                    cpv_desc = cls.get("description", "")
+                    break
+            if cpv_code:
+                break
     cpv_label = CPV_LABELS.get(cpv_code[:3], cpv_desc)
     deadline  = ((tender.get("tenderPeriod") or {}).get("endDate") or "TBD")
     value     = float(((tender.get("value") or {}).get("amount") or 0))
@@ -425,35 +446,39 @@ def fetch_fts_by_cpv(days_back: int = 90) -> list:
     from_dt = (today - timedelta(days=days_back)).strftime("%Y-%m-%dT00:00:00")
     to_dt   = today.strftime("%Y-%m-%dT23:59:59")
 
-    # FTS API uses different param names in different versions — try the right one
-    # Based on live testing: publishedFrom/publishedTo works, updatedFrom may not
-    DATE_PARAM_SETS = [
-        {"publishedFrom": from_dt, "publishedTo": to_dt},
-        {"updatedFrom": from_dt, "updatedTo": to_dt},
-    ]
+    # FTS API only accepts: updatedFrom, updatedTo, stages, limit, cursor
+    # publishedFrom is NOT valid — confirmed from API docs
+    working_params = {"updatedFrom": from_dt, "updatedTo": to_dt}
 
-    working_params = None
-    for date_params in DATE_PARAM_SETS:
-        try:
-            test_params = {**date_params, "limit": 5}
-            r = requests.get(FTS_API, params=test_params,
-                             headers={**HEADERS, "Accept": "application/json"}, timeout=20)
-            print(f"[FTS/CPV] Trying params {list(date_params.keys())}: HTTP {r.status_code}")
-            if r.status_code == 200:
-                data = r.json()
-                releases = data.get("releases", [])
-                print(f"[FTS/CPV] Got {len(releases)} releases, cursor={bool(data.get('cursor'))}")
-                if releases:
-                    # Show first CPV to confirm format
-                    sample = releases[0].get("tender", {}).get("classification", {})
-                    print(f"[FTS/CPV] Sample CPV: {sample.get('id','NONE')} — {sample.get('description','')[:40]}")
-                working_params = date_params
-                break
-        except Exception as e:
-            print(f"[FTS/CPV] Test failed: {e}")
-
-    if not working_params:
-        print("[FTS/CPV] Could not connect to FTS API")
+    # Quick test call to verify connectivity and log sample CPV format
+    try:
+        test_r = requests.get(FTS_API, params={**working_params, "limit": 3},
+                              headers={**HEADERS, "Accept": "application/json"}, timeout=20)
+        print(f"[FTS/CPV] API test: HTTP {test_r.status_code}")
+        if test_r.status_code == 200:
+            test_data  = test_r.json()
+            test_rels  = test_data.get("releases", [])
+            print(f"[FTS/CPV] Test page: {len(test_rels)} releases, cursor={bool(test_data.get('cursor'))}")
+            if test_rels:
+                t = test_rels[0].get("tender", {})
+                cpv1 = (t.get("classification") or {}).get("id", "NOT IN classification")
+                items = t.get("items", [])
+                cpv2  = ""
+                if items:
+                    for cls in items[0].get("additionalClassifications", []):
+                        if cls.get("scheme") == "CPV":
+                            cpv2 = cls.get("id", "")
+                print(f"[FTS/CPV] Sample tender.classification.id: {cpv1}")
+                print(f"[FTS/CPV] Sample items[0].additionalClassifications CPV: {cpv2 or 'not found'}")
+                print(f"[FTS/CPV] Sample title: {t.get('title','?')[:60]}")
+        elif test_r.status_code == 400:
+            print(f"[FTS/CPV] Bad request: {test_r.text[:200]}")
+            return []
+        else:
+            print(f"[FTS/CPV] Cannot connect: HTTP {test_r.status_code}")
+            return []
+    except Exception as e:
+        print(f"[FTS/CPV] Connection test failed: {e}")
         return []
 
     cursor     = None
