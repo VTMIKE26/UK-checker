@@ -416,23 +416,53 @@ FTS_API = "https://www.find-tender.service.gov.uk/api/1.0/ocdsReleasePackages"
 
 def fetch_fts_by_cpv(days_back: int = 90) -> list:
     """
-    Fetch FTS tenders filtered by relevant CPV code prefixes.
-    Paginates fully through all tenders in the window.
-    FTS returns ~500-2000 tenders/day across all categories.
-    We keep only IT/software/LE CPV codes (722-729, 480-489, 752).
+    Fetch ALL FTS tenders in date window, keep only IT/software/LE CPV codes.
+    Tries multiple API parameter names since FTS docs are inconsistent.
+    Fully paginates via cursor.
     """
     results, seen = [], set()
     today   = datetime.utcnow()
     from_dt = (today - timedelta(days=days_back)).strftime("%Y-%m-%dT00:00:00")
     to_dt   = today.strftime("%Y-%m-%dT23:59:59")
 
+    # FTS API uses different param names in different versions — try the right one
+    # Based on live testing: publishedFrom/publishedTo works, updatedFrom may not
+    DATE_PARAM_SETS = [
+        {"publishedFrom": from_dt, "publishedTo": to_dt},
+        {"updatedFrom": from_dt, "updatedTo": to_dt},
+    ]
+
+    working_params = None
+    for date_params in DATE_PARAM_SETS:
+        try:
+            test_params = {**date_params, "limit": 5}
+            r = requests.get(FTS_API, params=test_params,
+                             headers={**HEADERS, "Accept": "application/json"}, timeout=20)
+            print(f"[FTS/CPV] Trying params {list(date_params.keys())}: HTTP {r.status_code}")
+            if r.status_code == 200:
+                data = r.json()
+                releases = data.get("releases", [])
+                print(f"[FTS/CPV] Got {len(releases)} releases, cursor={bool(data.get('cursor'))}")
+                if releases:
+                    # Show first CPV to confirm format
+                    sample = releases[0].get("tender", {}).get("classification", {})
+                    print(f"[FTS/CPV] Sample CPV: {sample.get('id','NONE')} — {sample.get('description','')[:40]}")
+                working_params = date_params
+                break
+        except Exception as e:
+            print(f"[FTS/CPV] Test failed: {e}")
+
+    if not working_params:
+        print("[FTS/CPV] Could not connect to FTS API")
+        return []
+
     cursor     = None
     pages      = 0
     total_seen = 0
-    max_pages  = 50  # up to 5000 tenders
+    max_pages  = 50
 
     while pages < max_pages:
-        params = {"updatedFrom": from_dt, "updatedTo": to_dt, "limit": 100}
+        params = {**working_params, "limit": 100}
         if cursor:
             params["cursor"] = cursor
         try:
@@ -456,7 +486,6 @@ def fetch_fts_by_cpv(days_back: int = 90) -> list:
                 if not opp or opp.notice_id in seen:
                     continue
                 cpv_prefix = opp.cpv_code[:3] if opp.cpv_code else ""
-                # ONLY keep IT/software/LE CPV codes
                 if (cpv_prefix not in ALWAYS_RELEVANT_CPV_PREFIXES and
                         cpv_prefix not in CONDITIONAL_CPV_PREFIXES):
                     continue
@@ -464,6 +493,9 @@ def fetch_fts_by_cpv(days_back: int = 90) -> list:
                 results.append(score_opportunity(opp))
             cursor = data.get("cursor")
             pages += 1
+            # Log progress every 5 pages
+            if pages % 5 == 0:
+                print(f"[FTS/CPV] Page {pages}: {total_seen} scanned, {len(results)} CPV-matched so far")
             if not cursor or len(releases) < 100:
                 break
             time.sleep(0.3)
@@ -471,18 +503,18 @@ def fetch_fts_by_cpv(days_back: int = 90) -> list:
             print(f"[FTS/CPV] page {pages}: {e}")
             break
 
-    # Keep scored > 0 OR always-relevant CPV (even if scored 0, shows in Low Fit)
     relevant = [o for o in results
                 if o.tier != "⛔ Not a Fit"
                 and (o.score > 0 or o.cpv_code[:3] in ALWAYS_RELEVANT_CPV_PREFIXES)]
 
-    print(f"[FTS/CPV] {total_seen} total tenders scanned → {len(results)} CPV-matched → {len(relevant)} relevant")
+    print(f"[FTS/CPV] COMPLETE: {total_seen} total scanned → {len(results)} CPV-matched → {len(relevant)} relevant")
+    if total_seen == 0:
+        print("[FTS/CPV] WARNING: 0 total tenders — API may be returning empty results")
+    elif len(results) == 0:
+        print("[FTS/CPV] WARNING: No IT/software CPV codes found — all tenders may be non-IT")
     return relevant
 
 
-# ---------------------------------------------------------------------------
-# SOURCE 2: FTS — KEYWORD SEARCH (Peregrine-specific terms)
-# ---------------------------------------------------------------------------
 def fetch_fts_by_keyword(days_back: int = 90) -> list:
     """
     FTS keyword searches via the web search endpoint.
